@@ -33,9 +33,44 @@ page **is** loaded, and `vaddr_of()` currently says it is not. The "never loaded
 percentage is therefore an overestimate by up to one page per segment — for `hello-dyn`,
 that is a meaningful fraction of the headline 84.1%.
 
-Status: to fix. `MemImage` should carry both the segment extent and the page-rounded VMA,
-since the morph wants the exact extents (that is where the bytes go) and conformance wants
-the rounded ones (that is what the kernel did).
+**Fixed.** `MemImage` now carries three views: segment extents (what the morph draws),
+page-rounded `Vma`s (what the kernel created), and `Resident` file ranges (what "never
+loaded" is measured against). `vaddr_of` is page-aware.
+
+The two ends round by different rules, which is the part that is easy to get wrong:
+
+- **Leading**: `mmap` starts at the page containing `p_offset`, so the tail of whatever
+  precedes the segment is pulled in with it.
+- **Trailing**: whole pages come from the file, so bytes past `p_filesz` in the last page
+  are present too — *unless* `memsz > filesz`, in which case `padzero()` wipes them.
+
+Verified against a live process:
+
+```
+$ gdb -batch -ex starti -ex 'info proc mappings' fixtures/out/hello-dyn
+  0x555555554000 0x555555555000  r--p  offset 0x0
+  0x555555555000 0x555555556000  r-xp  offset 0x1000
+  0x555555556000 0x555555557000  r--p  offset 0x2000
+  0x555555557000 0x555555559000  rw-p  offset 0x2000
+
+$ elfa map fixtures/out/hello-dyn
+  0x00000000-0x00001000  r--
+  0x00001000-0x00002000  r-x
+  0x00002000-0x00003000  r--
+  0x00003000-0x00005000  rw-
+```
+
+Base-relative, the model and the kernel agree exactly.
+
+### And a fact that fell out of it
+
+Look at the file offsets in the two bottom rows: **0x2000 twice**. The read-only segment
+ends at file `0x2140` and the read-write segment begins at file `0x2db0`, both inside file
+page `0x2000`. The kernel maps that one page at two addresses with two different
+protections. `.rodata` is readable at `0x2000`; the same 4KB is writable at `0x3000`.
+
+`double_mapped_bytes()` reports this. For `hello-dyn` it is 4,096 bytes — 22% of the file
+exists twice in the address space.
 
 ## 2. RELRO splits one segment into two mappings
 

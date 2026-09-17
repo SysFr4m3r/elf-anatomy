@@ -48,7 +48,11 @@ are mapped slide across; bands that are not — section headers, symbol tables, 
 the padding between segments — stay put and fade, because nothing loads them. `.bss` grows
 from nothing on the memory side, since it is in `p_memsz` and in no file.
 
-For an unstripped hello-world, **84.1% of the file never becomes part of the process.**
+For an unstripped hello-world, **33.9% of the file never becomes part of the process** —
+section headers, symbol table, debug info. Another 4,096 bytes exist *twice*: the read-only
+and read-write segments share a file page, so the kernel maps it at two addresses with two
+different protections. Both numbers are checked against `/proc/<pid>/maps`; see
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md).
 
 ## Build
 

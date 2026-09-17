@@ -53,3 +53,20 @@ hence the jump from `0x2140` to `0x2db0`.
 
 Neither of these is visible in `readelf` output. You get them for free from the coverage
 invariant: claim every byte, and the leftovers explain themselves.
+
+**But padding is not the same as absent.** An early version of this note said 84.1% of
+`hello-dyn` never loads. That was wrong, and wrong in an instructive way: it measured
+against segment extents, while the kernel maps whole pages. Most of that padding shares a
+page with real content and is therefore in the process, occupying address space, doing
+nothing.
+
+The corrected figures for `hello-dyn`:
+
+| | bytes | |
+|---|---|---|
+| in the process | 12,312 | 66.1% |
+| never loaded | 6,320 | 33.9% — section headers, symtab, `.debug_*` |
+| zero-filled | 1,064 | `.bss`, in no file |
+| mapped twice | 4,096 | one file page at two addresses |
+
+33.9% is a smaller number than 84.1% and a true one. See `docs/CONFORMANCE.md`.

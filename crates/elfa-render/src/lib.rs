@@ -219,7 +219,9 @@ pub fn morph_svg(frame: &Frame<'_>, t: f64) -> String {
         flen = file_len as u64,
     ));
 
-    let mut never_loaded = 0u64;
+    // Measured on the image rather than accumulated per band: a band can straddle the
+    // edge of a mapped page, and attributing it by its first byte would be wrong.
+    let never_loaded = (file_len as u64).saturating_sub(frame.image.resident_bytes());
     // A band 3px tall still deserves its bytes counted, but not a label on top of its
     // neighbour's. Two floors, because the two columns are at different x and their
     // labels cannot collide with each other.
@@ -244,7 +246,6 @@ pub fn morph_svg(frame: &Frame<'_>, t: f64) -> String {
                 )
             }
             None => {
-                never_loaded = never_loaded.saturating_add(run.span.len);
                 // Left-behind bands must stay legible. They are the frame's argument:
                 // this is what a binary carries that never becomes part of a process.
                 (

@@ -331,7 +331,7 @@ fn cmd_map(args: &[&str]) -> ExitCode {
     let Some(p) = load(path) else {
         return ExitCode::FAILURE;
     };
-    let image = MemImage::from_segments(&p.summary.segments);
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
     let total = p.coverage.stats().total_bytes;
 
     println!("{path}  {} mappings\n", image.mappings().len());
@@ -349,8 +349,20 @@ fn cmd_map(args: &[&str]) -> ExitCode {
         );
     }
 
-    let mapped = image.mapped_bytes();
-    let never = total.saturating_sub(mapped);
+    println!("\n  kernel mappings — page-rounded, as /proc/<pid>/maps would show");
+    for v in image.vmas() {
+        println!(
+            "    {:#010x}-{:#010x}  {}  {:>10} bytes",
+            v.start,
+            v.end,
+            v.prot.as_str(),
+            commas(v.end.saturating_sub(v.start))
+        );
+    }
+
+    let resident = image.resident_bytes();
+    let never = total.saturating_sub(resident);
+    let double = image.double_mapped_bytes();
     let pct = |n: u64| -> f64 {
         if total == 0 {
             0.0
@@ -360,12 +372,12 @@ fn cmd_map(args: &[&str]) -> ExitCode {
     };
     println!();
     println!(
-        "  loaded from file  {:>12}  {:5.1}%",
-        commas(mapped),
-        pct(mapped)
+        "  in the process    {:>12}  {:5.1}%   including whatever shares a mapped page",
+        commas(resident),
+        pct(resident)
     );
     println!(
-        "  never loaded      {:>12}  {:5.1}%   section headers, symbols, debug info, padding",
+        "  never loaded      {:>12}  {:5.1}%   section headers, symbols, debug info",
         commas(never),
         pct(never)
     );
@@ -373,6 +385,12 @@ fn cmd_map(args: &[&str]) -> ExitCode {
         "  zero-filled       {:>12}          .bss — memory with no file behind it",
         commas(image.zero_filled_bytes())
     );
+    if double > 0 {
+        println!(
+            "  mapped twice      {:>12}          file pages shared by two segments",
+            commas(double)
+        );
+    }
     println!();
     ExitCode::SUCCESS
 }
@@ -415,7 +433,7 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
     let Some(p) = load(path) else {
         return ExitCode::FAILURE;
     };
-    let image = MemImage::from_segments(&p.summary.segments);
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
     if image.is_empty() {
         eprintln!("{path}: no PT_LOAD segments; nothing to map");
         return ExitCode::FAILURE;

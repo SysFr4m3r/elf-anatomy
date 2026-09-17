@@ -49,7 +49,7 @@ fn the_endpoints_tell_different_stories() {
         eprintln!("no fixtures; run `make -C fixtures`");
         return;
     };
-    let image = MemImage::from_segments(&p.summary.segments);
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
     let frame = Frame {
         coverage: &p.coverage,
         image: &image,
@@ -82,7 +82,7 @@ fn a_static_binary_still_maps() {
         eprintln!("no fixtures; run `make -C fixtures`");
         return;
     };
-    let image = MemImage::from_segments(&p.summary.segments);
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
     assert!(!image.is_empty(), "a static binary has PT_LOADs too");
     assert!(image.zero_filled_bytes() > 0, "and it has .bss");
 }

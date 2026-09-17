@@ -16,6 +16,10 @@ use alloc::vec::Vec;
 
 use elfa_parse::{FileId, Segment, Span};
 
+/// `mmap` granularity. Everything the kernel does to an image is in these units, and
+/// forgetting that is the difference between "never loaded" and "loaded by accident".
+pub const PAGE_SIZE: u64 = 4096;
+
 const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
@@ -80,10 +84,45 @@ impl Mapping {
     }
 }
 
+/// A page-rounded mapping — what `/proc/<pid>/maps` shows.
+///
+/// A `PT_LOAD` says `0xab30 .. 0xb0a0`; `mmap` produces `0xa000 .. 0xc000`. The rounding
+/// is not cosmetic: it decides whether a byte is in the process at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Vma {
+    pub start: u64,
+    pub end: u64,
+    pub prot: Prot,
+    pub segment: u32,
+}
+
+/// A range of *file* bytes that ends up visible in memory, and where.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Resident {
+    pub file: Span,
+    /// Virtual address of `file.start`.
+    pub vaddr: u64,
+    pub segment: u32,
+}
+
+const fn page_down(v: u64) -> u64 {
+    v & !(PAGE_SIZE - 1)
+}
+
+fn page_up(v: u64) -> u64 {
+    v.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
+}
+
 /// The address space of one loaded object.
 #[derive(Clone, Debug, Default)]
 pub struct MemImage {
+    /// Segment extents, exactly as the headers state them. What the morph draws.
     mappings: Vec<Mapping>,
+    /// Page-rounded mappings. What the kernel actually created.
+    vmas: Vec<Vma>,
+    /// File ranges that end up visible in a process. What "never loaded" is measured
+    /// against.
+    resident: Vec<Resident>,
 }
 
 impl MemImage {
@@ -92,9 +131,14 @@ impl MemImage {
     /// For `ET_DYN` the addresses are relative to a load base the kernel randomises; they
     /// are used here as given, which is what `readelf` shows and what makes two runs
     /// comparable.
+    ///
+    /// `file_len` bounds the resident ranges: page rounding must not claim bytes past the
+    /// end of the file.
     #[must_use]
-    pub fn from_segments(segments: &[Segment]) -> Self {
+    pub fn from_segments(segments: &[Segment], file_len: u64) -> Self {
         let mut mappings = Vec::new();
+        let mut vmas = Vec::new();
+        let mut resident = Vec::new();
         for (i, seg) in segments.iter().enumerate() {
             if seg.p_type != PT_LOAD {
                 continue;
@@ -111,6 +155,41 @@ impl MemImage {
                     segment: idx,
                 });
             }
+            vmas.push(Vma {
+                start: page_down(seg.vaddr),
+                end: page_up(seg.vaddr.saturating_add(seg.memsz)),
+                prot,
+                segment: idx,
+            });
+
+            // Page rounding extends the mapping at both ends, and the two ends follow
+            // different rules.
+            //
+            // Leading: `mmap` starts at the page containing `p_offset`, so file bytes
+            // before the segment — the tail of whatever precedes it — are pulled in too.
+            //
+            // Trailing: the kernel maps whole pages from the file, so the bytes after
+            // `p_filesz` in the last page are also present *unless* the segment has a
+            // zero-fill tail, in which case `padzero()` wipes them. That is why the rule
+            // below is conditional on `memsz > filesz`.
+            let file_lo = page_down(seg.offset);
+            let page_off = seg.offset.saturating_sub(file_lo);
+            let file_hi_exact = seg.offset.saturating_add(seg.filesz);
+            let file_hi = if seg.memsz > seg.filesz {
+                file_hi_exact
+            } else {
+                page_up(file_hi_exact)
+            }
+            .min(file_len);
+
+            if file_hi > file_lo {
+                resident.push(Resident {
+                    file: Span::new(FileId::PRIMARY, file_lo, file_hi.saturating_sub(file_lo)),
+                    vaddr: seg.vaddr.saturating_sub(page_off),
+                    segment: idx,
+                });
+            }
+
             let zero = seg.zero_fill();
             if zero > 0 {
                 mappings.push(Mapping {
@@ -123,7 +202,52 @@ impl MemImage {
             }
         }
         mappings.sort_unstable_by_key(|m| (m.vaddr, m.len));
-        Self { mappings }
+        vmas.sort_unstable_by_key(|v| (v.start, v.end));
+        resident.sort_unstable_by_key(|r| (r.file.start, r.file.len));
+        Self {
+            mappings,
+            vmas,
+            resident,
+        }
+    }
+
+    #[must_use]
+    pub fn vmas(&self) -> &[Vma] {
+        &self.vmas
+    }
+
+    #[must_use]
+    pub fn resident(&self) -> &[Resident] {
+        &self.resident
+    }
+
+    /// Distinct file bytes that end up in a process, counting doubly-mapped bytes once.
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        let mut total = 0u64;
+        let mut cursor = 0u64;
+        for r in &self.resident {
+            let start = r.file.start.max(cursor);
+            if r.file.end() > start {
+                total = total.saturating_add(r.file.end().saturating_sub(start));
+                cursor = r.file.end();
+            }
+        }
+        total
+    }
+
+    /// File bytes that appear at more than one virtual address.
+    ///
+    /// Not a curiosity: when two segments share a file page, that page is mapped twice at
+    /// different addresses with different protections.
+    #[must_use]
+    pub fn double_mapped_bytes(&self) -> u64 {
+        let sum: u64 = self
+            .resident
+            .iter()
+            .map(|r| r.file.len)
+            .fold(0, u64::saturating_add);
+        sum.saturating_sub(self.resident_bytes())
     }
 
     #[must_use]
@@ -138,19 +262,18 @@ impl MemImage {
 
     /// The virtual address a file offset ends up at, if any.
     ///
-    /// Returns `None` for the large fraction of a file that is never loaded: section
-    /// headers, symbol tables, debug info, and the padding between segments.
+    /// Page-aware: a byte in the padding after a segment's content but inside its last
+    /// mapped page *is* in the process, and this says so. Returns `None` for what is
+    /// genuinely never loaded — section headers, symbol tables, debug info, and any
+    /// padding large enough to fall outside every mapped page.
+    ///
+    /// When a byte is mapped twice, the lowest address wins. `resident()` has both.
     #[must_use]
     pub fn vaddr_of(&self, offset: u64) -> Option<u64> {
-        for m in &self.mappings {
-            if let MapSource::FromFile(span) = m.source
-                && offset >= span.start
-                && offset < span.end()
-            {
-                return Some(m.vaddr.saturating_add(offset.saturating_sub(span.start)));
-            }
-        }
-        None
+        self.resident
+            .iter()
+            .find(|r| offset >= r.file.start && offset < r.file.end())
+            .map(|r| r.vaddr.saturating_add(offset.saturating_sub(r.file.start)))
     }
 
     /// Lowest and highest virtual address in the image.
@@ -203,7 +326,7 @@ mod tests {
 
     #[test]
     fn a_segment_with_memsz_past_filesz_produces_bss() {
-        let img = MemImage::from_segments(&[load(0x2db0, 0x3db0, 0x268, 0x690)]);
+        let img = MemImage::from_segments(&[load(0x2db0, 0x3db0, 0x268, 0x690)], 0x4000);
         assert_eq!(img.mappings().len(), 2);
         assert_eq!(img.zero_filled_bytes(), 0x690 - 0x268);
         assert_eq!(img.mapped_bytes(), 0x268);
@@ -213,20 +336,58 @@ mod tests {
     }
 
     #[test]
-    fn file_offsets_outside_any_segment_have_no_address() {
-        let img = MemImage::from_segments(&[load(0x1000, 0x1000, 0x175, 0x175)]);
+    fn file_offsets_outside_any_mapped_page_have_no_address() {
+        let img = MemImage::from_segments(&[load(0x1000, 0x1000, 0x175, 0x175)], 0x4000);
         assert_eq!(img.vaddr_of(0x1000), Some(0x1000));
         assert_eq!(img.vaddr_of(0x1100), Some(0x1100));
-        // Section headers, symtab, debug info, padding: all of this.
+        // Past p_filesz but inside the last mapped page: loaded, because mmap works in
+        // whole pages. This is the correction that page-awareness buys.
+        assert_eq!(img.vaddr_of(0x1500), Some(0x1500));
+        assert_eq!(img.vaddr_of(0x1fff), Some(0x1fff));
+        // The next page belongs to nothing.
         assert_eq!(img.vaddr_of(0x2000), None);
         assert_eq!(img.vaddr_of(0), None);
+    }
+
+    #[test]
+    fn a_zero_fill_tail_stops_the_trailing_page_from_counting() {
+        // memsz > filesz, so padzero() wipes the rest of the last page. Those file bytes
+        // are not visible in the process even though their page is mapped.
+        let img = MemImage::from_segments(&[load(0x2db0, 0x3db0, 0x268, 0x690)], 0x4000);
+        assert_eq!(img.vaddr_of(0x3017), Some(0x4017));
+        assert_eq!(img.vaddr_of(0x3018), None);
+        // And the leading partial page is pulled in whole.
+        assert_eq!(img.vaddr_of(0x2000), Some(0x3000));
+    }
+
+    #[test]
+    fn two_segments_sharing_a_file_page_map_it_twice() {
+        let img = MemImage::from_segments(
+            &[
+                load(0x2000, 0x2000, 0x140, 0x140),
+                load(0x2db0, 0x3db0, 0x268, 0x690),
+            ],
+            0x4000,
+        );
+        // File page 0x2000 is reachable at 0x2000 and again at 0x3000.
+        assert_eq!(img.resident().len(), 2);
+        assert!(img.double_mapped_bytes() > 0);
+        // resident_bytes counts each file byte once.
+        assert!(img.resident_bytes() < 0x1000 + 0x1018);
+    }
+
+    #[test]
+    fn vmas_are_page_rounded() {
+        let img = MemImage::from_segments(&[load(0xab30, 0xab30, 0x570, 0x758)], 0x10000);
+        let v = img.vmas()[0];
+        assert_eq!((v.start, v.end), (0xa000, 0xc000));
     }
 
     #[test]
     fn non_load_segments_are_not_mapped_by_the_kernel() {
         let mut dynamic = load(0x2dc8, 0x3dc8, 0x1f0, 0x1f0);
         dynamic.p_type = 2; // PT_DYNAMIC — a view of bytes already inside a PT_LOAD
-        let img = MemImage::from_segments(&[dynamic]);
+        let img = MemImage::from_segments(&[dynamic], 0x4000);
         assert!(img.is_empty());
     }
 
