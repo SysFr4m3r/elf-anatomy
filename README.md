@@ -54,6 +54,24 @@ and read-write segments share a file page, so the kernel maps it at two addresse
 different protections. Both numbers are checked against `/proc/<pid>/maps`; see
 [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
 
+## Observing a real load
+
+```sh
+elfa trace fixtures/out/hello-dyn
+```
+
+Runs the program under `LD_DEBUG=all` and stops it twice under gdb — at the interpreter's
+first instruction and at the program's own entry — so the difference between the two
+snapshots is exactly what the dynamic linker did. `-o trace.json` writes the structured
+form.
+
+For a hello-world that is: 1 dependency resolved, 95 symbols bound before `main`,
+relocation applied to libc *before* the program, initialisers run in the opposite order,
+and one `mprotect` that turns the first page of the writable segment read-only.
+
+> **`elfa trace` executes the binary.** It is the only command here that does. Everything
+> else only reads bytes. Do not point it at something you would not run.
+
 ## Build
 
 ```sh

@@ -85,6 +85,28 @@ and will report `rw-` where reality says `r--`. This is not an error to correct 
 It also means **segment count never equals VMA count** on a hardened binary, which is worth
 knowing before writing a diff that assumes they line up.
 
+`elfa trace` now captures this directly. The two snapshots differ by exactly one
+`mprotect`:
+
+```
+at interpreter entry            at program entry
+  ...554000 r--p off 0x0          ...554000 r--p off 0x0
+  ...555000 r-xp off 0x1000       ...555000 r-xp off 0x1000
+  ...556000 r--p off 0x2000       ...556000 r--p off 0x2000
+  ...557000 rw-p off 0x2000  →    ...557000 r--p off 0x2000    ← RELRO applied
+    (two pages)                   ...558000 rw-p off 0x3000
+```
+
+The kernel handed the loader one writable two-page mapping. The loader relocated through
+it, then sealed the first page. Everything in that page — the GOT, `.init_array`,
+`.dynamic` — is read-only before `main` runs, and the process has one more VMA than the
+file has segments.
+
+## 4. musl and other loaders do not narrate
+
+`LD_DEBUG` is a glibc feature. On musl, `elfa trace` will capture the gdb snapshots and no
+steps at all. Static binaries have no loader to observe and are rejected outright.
+
 ## 3. ET_DYN addresses are relative
 
 `elfa map` prints `p_vaddr` as written in the file, starting at `0x0`. A real process has a

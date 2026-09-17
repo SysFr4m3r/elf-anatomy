@@ -1,0 +1,11 @@
+[package]
+name = "elfa-trace"
+description = "Capture what a real ld.so does, so the model has something to be wrong against."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

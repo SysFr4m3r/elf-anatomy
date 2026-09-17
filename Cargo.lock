@@ -9,6 +9,7 @@ dependencies = [
  "elfa-model",
  "elfa-parse",
  "elfa-render",
+ "elfa-trace",
 ]
 
 [[package]]
@@ -29,3 +30,7 @@ dependencies = [
  "elfa-model",
  "elfa-parse",
 ]
+
+[[package]]
+name = "elfa-trace"
+version = "0.0.0"

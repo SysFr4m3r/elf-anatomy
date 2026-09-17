@@ -21,6 +21,7 @@ USAGE
   elfa at <file> <offset>        what covers this byte? (offset may be decimal or 0x hex)
   elfa map <file>                what the kernel maps, and what it leaves behind
   elfa morph <file> [-o DIR]     the file→memory morph as SVG frames (--frames N, --t X)
+  elfa trace <file> [-o FILE]    run it and record what the real loader did (--json)
 ";
 
 fn main() -> ExitCode {
@@ -37,6 +38,7 @@ fn main() -> ExitCode {
         "at" => cmd_at(&rest),
         "map" => cmd_map(&rest),
         "morph" => cmd_morph(&rest),
+        "trace" => cmd_trace(&rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -481,6 +483,123 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
     }
     println!("{frames} frames in {dir}/");
     ExitCode::SUCCESS
+}
+
+fn cmd_trace(args: &[&str]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let mut out: Option<&str> = None;
+    let mut as_json = false;
+    let mut i = 1;
+    while let Some(arg) = args.get(i) {
+        match *arg {
+            "-o" | "--out" => {
+                out = args.get(i.saturating_add(1)).copied();
+                as_json = true;
+                i = i.saturating_add(1);
+            }
+            "--json" => as_json = true,
+            other => {
+                eprintln!("unknown flag `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+
+    let Some(p) = load(path) else {
+        return ExitCode::FAILURE;
+    };
+    if p.summary.interp.is_none() {
+        eprintln!("{path}: no PT_INTERP — a static binary has no dynamic loader to observe");
+        return ExitCode::FAILURE;
+    }
+
+    // Running the target is the whole point, and it is the one thing this tool does that
+    // touches the outside world. Say so.
+    eprintln!("running {path} to observe its load…");
+    let trace = match elfa_trace::capture(
+        std::path::Path::new(path),
+        p.summary.entry,
+        p.summary.e_type == 3,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if as_json {
+        let json = elfa_trace::to_json(&trace);
+        return match out {
+            Some(f) => write_file(std::path::Path::new(f), &json),
+            None => {
+                print!("{json}");
+                ExitCode::SUCCESS
+            }
+        };
+    }
+
+    report_trace(&trace);
+    ExitCode::SUCCESS
+}
+
+fn report_trace(trace: &elfa_trace::Trace) {
+    use elfa_trace::StepKind;
+
+    println!("{}  {} steps observed\n", trace.target, trace.steps.len());
+
+    println!("  objects, in the order the loader met them");
+    for o in trace.objects() {
+        println!("    {o}");
+    }
+
+    let reloc = trace.relocation_order();
+    if !reloc.is_empty() {
+        println!("\n  relocation order — dependencies first, program after");
+        for o in &reloc {
+            println!("    {o}");
+        }
+    }
+
+    let init = trace.init_order();
+    if !init.is_empty() {
+        println!("\n  initialiser order — program last");
+        for o in &init {
+            println!("    {o}");
+        }
+    }
+
+    for step in &trace.steps {
+        if let StepKind::Search { library, tried } = &step.kind {
+            println!("\n  search for {library}");
+            for path in tried {
+                println!("    {path}");
+            }
+        }
+    }
+
+    println!(
+        "\n  {} symbols bound before the program ran",
+        trace.bind_count()
+    );
+    println!(
+        "  mappings: {} at the interpreter's first instruction, {} at the program's entry",
+        trace.maps_at_interp.len(),
+        trace.maps_at_entry.len()
+    );
+
+    let grew = trace
+        .maps_at_entry
+        .len()
+        .saturating_sub(trace.maps_at_interp.len());
+    if grew > 0 {
+        println!("  the dynamic linker added {grew} mappings");
+    }
+    println!();
 }
 
 fn write_file(path: &std::path::Path, contents: &str) -> ExitCode {
