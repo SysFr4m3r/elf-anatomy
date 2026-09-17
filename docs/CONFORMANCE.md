@@ -120,9 +120,45 @@ though it shares a page, and a mapping is not merged with its neighbour just bec
 ended up with the same protection. The kernel does both.
 
 For `hello-dyn` the model ends with 6 mappings and `/proc` shows 5. Neither is wrong; they
-are different views. Before the phase 4 diff can compare them it needs a
-`State::vmas()` — page-round each mapping, then merge adjacent runs with equal
-protection — and the comparison must be made on that, not on the raw list.
+are different views.
+
+**Done.** `State::vmas()` builds the kernel's view page by page, later mappings overwriting
+earlier ones. `elfa diff` compares on that. Getting the merge rule right took three
+corrections, each found by a binary that broke the previous version:
+
+1. **Protection alone is not enough.** `hello-dyn` has two adjacent read-only VMAs whose
+   protections match. They stay separate because both segments start inside file page
+   `0x2000`, so the second does not continue the first's offset.
+2. **Contiguous offsets are not enough either.** `/bin/true`'s third segment ends at page
+   `0x9000` and RELRO turns the first page of the fourth read-only — two adjacent
+   read-only pages whose offsets *do* line up (`0x7000 + 0x2000 = 0x9000`), and the kernel
+   still reports them separately. A VMA merge requires identical `vm_flags`, and those two
+   carry different lineage. The model never merges across segments, which reproduces every
+   table observed so far.
+3. **`.bss` past the last file-backed page is anonymous.** `/bin/ls` has `p_memsz`
+   overrunning its final file page, and the kernel gives the remainder a VMA with no path.
+   Filtering observed rows by path drops it, and the model then looks like it invented a
+   mapping. `elfa diff` follows anonymous rows that continue directly from the object's.
+
+With those three rules the model reproduces the mapping table exactly — addresses,
+protections, offsets and boundaries — for `hello-dyn`, `hello-nopie`, `lazy`, `relr`,
+`/bin/true` and `/bin/ls`.
+
+## 7. ET_EXEC has no load base
+
+`elfa diff` normalises observed addresses by subtracting the lowest mapping start, so a
+PIE's randomised base does not read as a divergence. An `ET_EXEC` is mapped at the
+addresses written in its headers — `hello-nopie` at `0x400000` — and subtracting anything
+turns a perfect match into a whole-table divergence. The normalisation applies to `ET_DYN`
+only.
+
+## 8. glibc annotates lazy objects
+
+`LD_DEBUG` prints `relocation processing: <object> (lazy)` when an object binds lazily.
+That is the loader stating the binding mode it actually used, which is better evidence than
+inferring it from `DT_FLAGS` — so `elfa diff` checks the model's reading of `DT_FLAGS`
+against it. The suffix has to be stripped before the name is matched, or nothing matches
+the object again.
 
 ## 6. RELRO rounds down at both ends
 

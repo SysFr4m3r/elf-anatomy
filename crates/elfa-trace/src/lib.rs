@@ -93,8 +93,13 @@ pub enum StepKind {
         order: Vec<String>,
     },
     /// Relocations applied to one object.
+    ///
+    /// `lazy` comes from glibc's own annotation: it prints `relocation processing: <obj>
+    /// (lazy)` when the object binds lazily. That is the loader stating the binding mode
+    /// it actually used, which is worth more than inferring it from DT_FLAGS.
     Relocate {
         object: String,
+        lazy: bool,
     },
     /// One symbol resolved: `symbol` in `from` bound to a definition in `to`.
     Bind {
@@ -236,7 +241,7 @@ impl Trace {
                 }
                 StepKind::LinkMap { file, .. } => push(file, &mut seen),
                 StepKind::Scope { object, .. }
-                | StepKind::Relocate { object }
+                | StepKind::Relocate { object, .. }
                 | StepKind::Init { object }
                 | StepKind::InitializeProgram { object }
                 | StepKind::TransferControl { object } => push(object, &mut seen),
@@ -252,10 +257,19 @@ impl Trace {
         self.steps
             .iter()
             .filter_map(|s| match &s.kind {
-                StepKind::Relocate { object } => Some(object.as_str()),
+                StepKind::Relocate { object, .. } => Some(object.as_str()),
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether the loader reported an object as binding lazily.
+    #[must_use]
+    pub fn binds_lazily(&self, name_suffix: &str) -> Option<bool> {
+        self.steps.iter().find_map(|s| match &s.kind {
+            StepKind::Relocate { object, lazy } if object.ends_with(name_suffix) => Some(*lazy),
+            _ => None,
+        })
     }
 
     /// Initialiser order, program last.
@@ -401,8 +415,11 @@ pub fn parse_ld_debug(text: &str) -> Vec<Step> {
         }
 
         if let Some(rest) = after(t, "relocation processing:") {
+            let lazy = rest.trim_end().ends_with("(lazy)");
+            let name = rest.trim_end().trim_end_matches("(lazy)");
             steps.push(StepKind::Relocate {
-                object: object_name(rest),
+                object: object_name(name),
+                lazy,
             });
             continue;
         }
@@ -691,8 +708,11 @@ pub fn to_json(trace: &Trace) -> String {
                 s.push_str(",\"order\":");
                 json_list(order, &mut s);
             }
-            StepKind::Relocate { object }
-            | StepKind::Init { object }
+            StepKind::Relocate { object, lazy } => {
+                field("object", object, &mut s);
+                let _ = write!(s, ",\"lazy\":{lazy}");
+            }
+            StepKind::Init { object }
             | StepKind::InitializeProgram { object }
             | StepKind::TransferControl { object }
             | StepKind::Fini { object } => field("object", object, &mut s),
@@ -759,7 +779,7 @@ mod tests {
      36502:	object=./hello-dyn [0]
      36502:	 scope 0: ./hello-dyn /usr/lib/x86_64-linux-gnu/libc.so.6 /lib64/ld-linux-x86-64.so.2
      36502:	
-     36502:	relocation processing: /usr/lib/x86_64-linux-gnu/libc.so.6
+     36502:	relocation processing: /usr/lib/x86_64-linux-gnu/libc.so.6 (lazy)
      36502:	binding file ./hello-dyn [0] to /usr/lib/x86_64-linux-gnu/libc.so.6 [0]: normal symbol `fputs' [GLIBC_2.2.5]
      36502:	relocation processing: ./hello-dyn
      36502:	calling init: /lib64/ld-linux-x86-64.so.2
@@ -836,6 +856,23 @@ mod tests {
             .position(|s| matches!(s.kind, StepKind::Init { .. }))
             .expect("an init step");
         assert!(last_reloc < first_init);
+    }
+
+    #[test]
+    fn glibc_annotates_lazy_objects_and_the_name_survives_it() {
+        let trace = Trace {
+            steps: parse_ld_debug(SAMPLE),
+            ..Trace::default()
+        };
+        // "relocation processing: <path> (lazy)" — the marker must not end up in the name,
+        // or nothing matches the object again.
+        assert_eq!(
+            trace.relocation_order(),
+            vec!["/usr/lib/x86_64-linux-gnu/libc.so.6", "./hello-dyn"]
+        );
+        assert_eq!(trace.binds_lazily("libc.so.6"), Some(true));
+        assert_eq!(trace.binds_lazily("hello-dyn"), Some(false));
+        assert_eq!(trace.binds_lazily("nothing-like-this"), None);
     }
 
     #[test]

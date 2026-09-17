@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use elfa_parse::{FileId, RelocTableKind, Segment, Span};
@@ -33,6 +34,17 @@ pub struct Prot {
 }
 
 impl Prot {
+    /// Parse a `/proc/<pid>/maps` permission field such as `r-xp`.
+    #[must_use]
+    pub fn from_perms(s: &str) -> Self {
+        let has = |c: char| s.contains(c);
+        Self {
+            read: has('r'),
+            write: has('w'),
+            exec: has('x'),
+        }
+    }
+
     #[must_use]
     pub const fn from_flags(f: u32) -> Self {
         Self {
@@ -93,6 +105,9 @@ pub struct Vma {
     pub start: u64,
     pub end: u64,
     pub prot: Prot,
+    /// File offset the mapping starts at, or `None` when it is anonymous. `/proc` prints
+    /// this, and it is what decides whether two neighbours are one mapping or two.
+    pub offset: Option<u64>,
     pub segment: u32,
 }
 
@@ -162,6 +177,7 @@ impl MemImage {
                 start: page_down(seg.vaddr),
                 end: page_up(seg.vaddr.saturating_add(seg.memsz)),
                 prot,
+                offset: Some(page_down(seg.offset)),
                 segment: idx,
             });
 
@@ -414,6 +430,7 @@ mod tests {
         let img = MemImage::from_segments(&[load(0xab30, 0xab30, 0x570, 0x758)], 0x10000);
         let v = img.vmas()[0];
         assert_eq!((v.start, v.end), (0xa000, 0xc000));
+        assert_eq!(v.offset, Some(0xa000));
     }
 
     #[test]
@@ -565,6 +582,92 @@ pub struct State {
 }
 
 impl State {
+    /// The mappings as the kernel would report them: page-rounded, and merged wherever
+    /// adjacent pages share a protection.
+    ///
+    /// The raw `mappings` list is segment-exact — `.bss` is its own entry, and an
+    /// `mprotect` split stays split even if both halves end up identical. `/proc` shows
+    /// neither. Any comparison against an observed trace has to be made on this view, or
+    /// it compares two different things and calls the difference a divergence.
+    ///
+    /// Built page by page so that later mappings overwrite earlier ones at the same
+    /// address, which is what `mmap` and `mprotect` actually do.
+    #[must_use]
+    pub fn vmas(&self) -> Vec<Vma> {
+        struct Page {
+            prot: Prot,
+            offset: Option<u64>,
+            segment: u32,
+        }
+        let mut pages: BTreeMap<u64, Page> = BTreeMap::new();
+
+        for m in &self.mappings {
+            let base = page_down(m.vaddr);
+            let mut page = base;
+            let end = page_up(m.end());
+            while page < end {
+                let offset = match m.source {
+                    MapSource::FromFile(span) => {
+                        Some(page_down(span.start).saturating_add(page.saturating_sub(base)))
+                    }
+                    // A zero-fill tail shares the last file-backed page; the kernel maps
+                    // that page from the file and wipes part of it, so the offset already
+                    // recorded for the page is the right one.
+                    MapSource::ZeroFill => pages.get(&page).and_then(|p| p.offset),
+                };
+                pages.insert(
+                    page,
+                    Page {
+                        prot: m.prot,
+                        offset,
+                        segment: m.segment,
+                    },
+                );
+                page = page.saturating_add(PAGE_SIZE);
+            }
+        }
+
+        let mut out: Vec<Vma> = Vec::new();
+        for (page, p) in pages {
+            // Two neighbours merge only when they came from the same segment, their
+            // protections agree, *and* their file offsets continue.
+            //
+            // The offset condition is why hello-dyn keeps two read-only VMAs: its
+            // read-only and read-write segments both start inside file page 0x2000, so
+            // the second does not continue the first.
+            //
+            // The segment condition is why /bin/true does. Its third segment ends at page
+            // 0x9000 and RELRO turns the first page of the fourth read-only, leaving two
+            // adjacent read-only pages whose offsets *do* line up — and the kernel still
+            // reports them separately, because a VMA merge needs identical vm_flags and
+            // those two carry different lineage. Modelling that as "never merge across
+            // segments" reproduces every mapping table observed so far.
+            let continues = out.last().is_some_and(|last| {
+                last.end == page
+                    && last.prot == p.prot
+                    && last.segment == p.segment
+                    && match (last.offset, p.offset) {
+                        (Some(a), Some(b)) => {
+                            a.saturating_add(page.saturating_sub(last.start)) == b
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    }
+            });
+            match out.last_mut() {
+                Some(last) if continues => last.end = page.saturating_add(PAGE_SIZE),
+                _ => out.push(Vma {
+                    start: page,
+                    end: page.saturating_add(PAGE_SIZE),
+                    prot: p.prot,
+                    offset: p.offset,
+                    segment: p.segment,
+                }),
+            }
+        }
+        out
+    }
+
     /// Protection in force at an address, if it is mapped at all.
     #[must_use]
     pub fn prot_at(&self, addr: u64) -> Option<Prot> {
@@ -1105,6 +1208,65 @@ mod timeline_tests {
         assert_eq!(bytes(&tl.state_at(kernel_end)), bytes(&tl.state_at(end)));
         // But it does change how many mappings that takes.
         assert!(tl.state_at(end).mappings.len() > tl.state_at(kernel_end).mappings.len());
+    }
+
+    #[test]
+    fn vmas_are_page_rounded_and_merged() {
+        let (tl, _) = plan(true);
+        let end = tl.state_at(tl.len().saturating_sub(1));
+        let vmas = end.vmas();
+
+        // Page-aligned at both ends, contiguous where protections agree, and strictly
+        // ordered — the shape /proc reports.
+        for w in vmas.windows(2) {
+            assert!(w[0].end <= w[1].start, "vmas overlap: {vmas:?}");
+            // Adjacent, same protection *and* continuing file offset would have merged.
+            let would_merge = w[0].end == w[1].start
+                && w[0].prot == w[1].prot
+                && match (w[0].offset, w[1].offset) {
+                    (Some(a), Some(b)) => a + (w[1].start - w[0].start) == b,
+                    (None, None) => true,
+                    _ => false,
+                };
+            assert!(!would_merge, "vmas were not merged: {vmas:?}");
+        }
+        for v in &vmas {
+            assert_eq!(v.start % PAGE_SIZE, 0);
+            assert_eq!(v.end % PAGE_SIZE, 0);
+        }
+        // The raw list is more granular than the merged one: .bss is its own mapping but
+        // shares a page and a protection with what precedes it.
+        assert!(vmas.len() < end.mappings.len(), "{vmas:?}");
+    }
+
+    #[test]
+    fn neighbours_from_different_segments_never_merge() {
+        // Two read-only pages, adjacent, with offsets that line up perfectly — and the
+        // kernel still reports them separately, because they came from different
+        // segments. /bin/true does exactly this after RELRO.
+        let state = State {
+            mappings: alloc::vec![
+                Mapping {
+                    vaddr: 0x7000,
+                    len: 0x2000,
+                    prot: Prot::from_flags(PF_R),
+                    source: MapSource::FromFile(Span::new(FileId::PRIMARY, 0x7000, 0x2000)),
+                    segment: 3,
+                },
+                Mapping {
+                    vaddr: 0x9000,
+                    len: 0x1000,
+                    prot: Prot::from_flags(PF_R),
+                    source: MapSource::FromFile(Span::new(FileId::PRIMARY, 0x9000, 0x1000)),
+                    segment: 4,
+                },
+            ],
+            poked: Vec::new(),
+        };
+        let vmas = state.vmas();
+        assert_eq!(vmas.len(), 2, "different segments must not merge: {vmas:?}");
+        assert_eq!(vmas[0].end, vmas[1].start);
+        assert_eq!(vmas[0].prot, vmas[1].prot);
     }
 
     #[test]

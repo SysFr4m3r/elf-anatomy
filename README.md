@@ -88,6 +88,26 @@ For a hello-world that is: 1 dependency resolved, 95 symbols bound before `main`
 relocation applied to libc *before* the program, initialisers run in the opposite order,
 and one `mprotect` that turns the first page of the writable segment read-only.
 
+## Checking the model against reality
+
+```sh
+elfa diff fixtures/out/hello-dyn
+```
+
+```
+  ok    mappings               5 vmas, identical base-relative
+  ok    DT_NEEDED              1 resolved: libc.so.6
+  ok    relocation order       1 object(s) relocated before the program
+  ok    initialiser order      program last, after 2
+  ok    binding mode           BIND_NOW — PLT relocations applied before main
+  --    symbol binds           model: 7 for this object; observed: 95 process-wide
+```
+
+The model reproduces the kernel's mapping table exactly — addresses, protections, file
+offsets and VMA boundaries — for every fixture and for `/bin/true` and `/bin/ls`. Areas the
+model does not claim anything about are marked `--` rather than passed silently: an
+unchecked area that looks checked is worse than a gap you can see.
+
 > **`elfa trace` executes the binary.** It is the only command here that does. Everything
 > else only reads bytes. Do not point it at something you would not run.
 

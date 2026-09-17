@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use elfa_model::{MapSource, MemImage, Timeline};
+use elfa_model::{MapSource, MemImage, Prot, Timeline};
 use elfa_parse::{ClaimId, ClaimKind, Coverage, Parsed, Span, Value, elf, parse};
 use elfa_render::{Frame, StepView, morph_svg};
 
@@ -24,6 +24,7 @@ USAGE
                                  --step N renders the image as of one step of the load
   elfa trace <file> [-o FILE]    run it and record what the real loader did (--json)
   elfa steps <file>              the modelled load, step by step (--limit N, --phase P)
+  elfa diff <file>               check the model against what the real loader does
 ";
 
 fn main() -> ExitCode {
@@ -42,6 +43,7 @@ fn main() -> ExitCode {
         "morph" => cmd_morph(&rest),
         "trace" => cmd_trace(&rest),
         "steps" => cmd_steps(&rest),
+        "diff" => cmd_diff(&rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -585,6 +587,311 @@ fn cmd_steps(args: &[&str]) -> ExitCode {
     );
     println!();
     ExitCode::SUCCESS
+}
+
+/// A mapping as both sides describe it: base-relative range, protection, file offset.
+type Row = (u64, u64, Prot, Option<u64>);
+
+/// One comparison between the model and an observed load.
+struct Check {
+    name: &'static str,
+    verdict: Verdict,
+    detail: String,
+}
+
+enum Verdict {
+    Match,
+    Differ,
+    /// The model does not claim anything here, so there is nothing to check. Said out
+    /// loud rather than silently passing — an unchecked area that looks checked is worse
+    /// than a gap you can see.
+    NotModelled,
+}
+
+impl Verdict {
+    const fn mark(&self) -> &'static str {
+        match self {
+            Self::Match => "ok  ",
+            Self::Differ => "DIFF",
+            Self::NotModelled => "--  ",
+        }
+    }
+}
+
+fn cmd_diff(args: &[&str]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let Some(p) = load(path) else {
+        return ExitCode::FAILURE;
+    };
+    if p.summary.interp.is_none() {
+        eprintln!("{path}: static binary — no dynamic loader to compare against");
+        return ExitCode::FAILURE;
+    }
+
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
+    let timeline = Timeline::plan(&p.summary, &image);
+    let modelled = timeline.state_at(timeline.len().saturating_sub(1));
+
+    eprintln!("running {path} to observe its load…");
+    let observed = match elfa_trace::capture(
+        std::path::Path::new(path),
+        p.summary.entry,
+        p.summary.e_type == 3,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let checks = compare(path, &p, &modelled, &observed);
+    println!("\n{path}  model vs observed\n");
+    let mut diverged = 0usize;
+    for c in &checks {
+        println!("  {}  {:<22} {}", c.verdict.mark(), c.name, c.detail);
+        if matches!(c.verdict, Verdict::Differ) {
+            diverged = diverged.saturating_add(1);
+        }
+    }
+    println!();
+    if diverged > 0 {
+        println!(
+            "  {diverged} divergence{}. A divergence is a fact about loading until it is\n  explained; see docs/CONFORMANCE.md.\n",
+            if diverged == 1 { "" } else { "s" }
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn compare(
+    path: &str,
+    p: &Parsed,
+    modelled: &elfa_model::State,
+    observed: &elfa_trace::Trace,
+) -> Vec<Check> {
+    let mut checks = Vec::new();
+
+    // The observed rows for the target itself, made base-relative so a PIE's randomised
+    // load address does not read as a divergence.
+    let stem = std::path::Path::new(path)
+        .file_name()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    // Rows for the object itself — plus any anonymous mapping that continues directly
+    // from them. When .bss spills past the last file-backed page, the kernel gives it an
+    // anonymous VMA with no path, and filtering on the path alone silently drops it: the
+    // model is then accused of inventing a mapping that genuinely exists.
+    let mut rows: Vec<&elfa_trace::MapRow> = Vec::new();
+    let mut taking = false;
+    for r in &observed.maps_at_entry {
+        let mine = !stem.is_empty() && r.path.ends_with(&stem);
+        let continues_mine =
+            taking && r.path.is_empty() && rows.last().is_some_and(|last| last.end == r.start);
+        if mine || continues_mine {
+            rows.push(r);
+            taking = true;
+        } else if !r.path.is_empty() {
+            taking = false;
+        }
+    }
+    // Only a position-independent executable has a load base to subtract. An ET_EXEC is
+    // mapped at the addresses written in its headers, and "normalising" those would turn
+    // a perfect match into a whole-table divergence.
+    let base = if p.summary.e_type == 3 {
+        rows.iter().map(|r| r.start).min().unwrap_or(0)
+    } else {
+        0
+    };
+
+    // File offset is part of the comparison: it is what makes two adjacent mappings with
+    // the same protection two VMAs instead of one.
+    let obs: Vec<Row> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.start.saturating_sub(base),
+                r.end.saturating_sub(base),
+                Prot::from_perms(&r.perms),
+                if r.path.is_empty() {
+                    None
+                } else {
+                    Some(r.offset)
+                },
+            )
+        })
+        .collect();
+    let model: Vec<Row> = modelled
+        .vmas()
+        .iter()
+        .map(|v| (v.start, v.end, v.prot, v.offset))
+        .collect();
+
+    checks.push(if obs.is_empty() {
+        Check {
+            name: "mappings",
+            verdict: Verdict::NotModelled,
+            detail: "gdb reported no mappings for the target".to_owned(),
+        }
+    } else if obs == model {
+        Check {
+            name: "mappings",
+            verdict: Verdict::Match,
+            detail: format!("{} vmas, identical base-relative", obs.len()),
+        }
+    } else {
+        Check {
+            name: "mappings",
+            verdict: Verdict::Differ,
+            detail: format!(
+                "model {} vmas, observed {}\n{}",
+                model.len(),
+                obs.len(),
+                side_by_side(&model, &obs)
+            ),
+        }
+    });
+
+    // Dependencies: the model knows SONAMEs, the trace knows resolved paths.
+    let wanted: Vec<&str> = p.summary.needed.iter().map(AsRef::as_ref).collect();
+    let resolved: Vec<String> = observed.aliases().keys().cloned().collect();
+    let missing: Vec<&&str> = wanted
+        .iter()
+        .filter(|w| !resolved.iter().any(|r| r == **w))
+        .collect();
+    checks.push(Check {
+        name: "DT_NEEDED",
+        verdict: if missing.is_empty() && !wanted.is_empty() {
+            Verdict::Match
+        } else if wanted.is_empty() {
+            Verdict::NotModelled
+        } else {
+            Verdict::Differ
+        },
+        detail: if missing.is_empty() {
+            format!("{} resolved: {}", wanted.len(), wanted.join(", "))
+        } else {
+            format!("never searched for: {missing:?}")
+        },
+    });
+
+    // The model claims dependencies are relocated before the program. The trace can
+    // confirm or refute that directly.
+    let order = observed.relocation_order();
+    let self_at = order.iter().position(|o| o.ends_with(&stem));
+    checks.push(match self_at {
+        Some(i) if i > 0 => Check {
+            name: "relocation order",
+            verdict: Verdict::Match,
+            detail: format!("{} object(s) relocated before the program", i),
+        },
+        Some(_) => Check {
+            name: "relocation order",
+            verdict: Verdict::Differ,
+            detail: "the program was relocated first, before its dependencies".to_owned(),
+        },
+        None => Check {
+            name: "relocation order",
+            verdict: Verdict::NotModelled,
+            detail: "the program does not appear in the observed order".to_owned(),
+        },
+    });
+
+    // Initialisers: the program must be last.
+    let init = observed.init_order();
+    checks.push(match init.last() {
+        Some(last) if last.ends_with(&stem) => Check {
+            name: "initialiser order",
+            verdict: Verdict::Match,
+            detail: format!("program last, after {}", init.len().saturating_sub(1)),
+        },
+        Some(last) => Check {
+            name: "initialiser order",
+            verdict: Verdict::Differ,
+            detail: format!("expected the program last, observed {last}"),
+        },
+        None => Check {
+            name: "initialiser order",
+            verdict: Verdict::NotModelled,
+            detail: "no initialisers observed".to_owned(),
+        },
+    });
+
+    // Binding mode: the model reads DT_FLAGS, the loader says what it actually did.
+    checks.push(match observed.binds_lazily(&stem) {
+        Some(lazy) if lazy == !p.summary.bind_now => Check {
+            name: "binding mode",
+            verdict: Verdict::Match,
+            detail: if lazy {
+                "lazy — PLT relocations deferred to first call".to_owned()
+            } else {
+                "BIND_NOW — PLT relocations applied before main".to_owned()
+            },
+        },
+        Some(lazy) => Check {
+            name: "binding mode",
+            verdict: Verdict::Differ,
+            detail: format!(
+                "model says {}, loader reports {}",
+                if p.summary.bind_now {
+                    "BIND_NOW"
+                } else {
+                    "lazy"
+                },
+                if lazy { "lazy" } else { "BIND_NOW" }
+            ),
+        },
+        None => Check {
+            name: "binding mode",
+            verdict: Verdict::NotModelled,
+            detail: "the loader did not report relocating this object".to_owned(),
+        },
+    });
+
+    // Symbol binding is deliberately not asserted equal: the trace counts every bind in
+    // the process, including libc's own and the vDSO's, and the model covers one object.
+    let model_syms = p
+        .summary
+        .relocs
+        .iter()
+        .filter(|r| r.symbol.is_some())
+        .count();
+    checks.push(Check {
+        name: "symbol binds",
+        verdict: Verdict::NotModelled,
+        detail: format!(
+            "model: {model_syms} for this object; observed: {} process-wide",
+            observed.bind_count()
+        ),
+    });
+
+    checks
+}
+
+fn side_by_side(model: &[Row], obs: &[Row]) -> String {
+    let mut s = String::new();
+    let rows = model.len().max(obs.len());
+    let fmt = |v: Option<&Row>| -> String {
+        v.map_or_else(
+            || " ".repeat(33),
+            |(a, b, p, off)| {
+                format!(
+                    "{a:#08x}-{b:#08x} {} off {}",
+                    p.as_str(),
+                    off.map_or_else(|| "anon".to_owned(), |o| format!("{o:#07x}"))
+                )
+            },
+        )
+    };
+    for i in 0..rows {
+        let m = fmt(model.get(i));
+        let o = fmt(obs.get(i));
+        let mark = if model.get(i) == obs.get(i) { " " } else { "*" };
+        s.push_str(&format!("\n        {mark} {m}   {o}"));
+    }
+    s
 }
 
 fn cmd_trace(args: &[&str]) -> ExitCode {
