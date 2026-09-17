@@ -7,7 +7,7 @@ exclude = ["fuzz"]
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.90"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/SysFr4m3r/elf-anatomy"
 
 [workspace.lints.rust]

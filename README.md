@@ -124,8 +124,3 @@ they resolve but not themselves mapped or relocated. `elfa trace` needs glibc, s
 | [docs/CONFORMANCE.md](docs/CONFORMANCE.md) | Every place the model and a real `ld.so` disagreed |
 | [docs/FORMAT-NOTES.md](docs/FORMAT-NOTES.md) | What the specimens taught us that the spec does not say plainly |
 | [docs/RENDERING.md](docs/RENDERING.md) | Why the renderer is headless first |
-
-## License
-
-MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
-[LICENSE-APACHE](LICENSE-APACHE).
