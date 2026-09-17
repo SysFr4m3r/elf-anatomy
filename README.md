@@ -27,7 +27,8 @@ cargo build --release
   unexplained          2,246    1.3%
 
   largest unexplained regions
-    0x00026578       1,880  after .data, before .symtab
+    0x00026578       1,880  after .note.ABI-tag, before .init_array
+    0x00003f50         176  after .rela.plt, before .init  (page alignment)
 ```
 
 `elfa dump <file>` prints the claim tree; `elfa at <file> <offset>` says what covers one
