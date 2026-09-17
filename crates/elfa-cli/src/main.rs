@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use elfa_model::{MapSource, MemImage, Timeline};
 use elfa_parse::{ClaimId, ClaimKind, Coverage, Parsed, Span, Value, elf, parse};
-use elfa_render::{Frame, morph_svg};
+use elfa_render::{Frame, StepView, morph_svg};
 
 const USAGE: &str = "\
 elfa — look at what is actually in an ELF file
@@ -21,6 +21,7 @@ USAGE
   elfa at <file> <offset>        what covers this byte? (offset may be decimal or 0x hex)
   elfa map <file>                what the kernel maps, and what it leaves behind
   elfa morph <file> [-o DIR]     the file→memory morph as SVG frames (--frames N, --t X)
+                                 --step N renders the image as of one step of the load
   elfa trace <file> [-o FILE]    run it and record what the real loader did (--json)
   elfa steps <file>              the modelled load, step by step (--limit N, --phase P)
 ";
@@ -407,6 +408,7 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
     let mut out_dir: Option<&str> = None;
     let mut frames = 48usize;
     let mut single: Option<f64> = None;
+    let mut step: Option<usize> = None;
 
     let mut i = 1;
     while let Some(arg) = args.get(i) {
@@ -424,6 +426,10 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
             }
             "--t" => {
                 single = args.get(i.saturating_add(1)).and_then(|v| v.parse().ok());
+                i = i.saturating_add(1);
+            }
+            "--step" => {
+                step = args.get(i.saturating_add(1)).and_then(|v| v.parse().ok());
                 i = i.saturating_add(1);
             }
             other => {
@@ -451,12 +457,41 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
         s.entry,
         commas(p.coverage.stats().total_bytes)
     );
+    // The timeline is built either way: --step selects a moment in it, and without it
+    // the frame is the finished load.
+    let timeline = Timeline::plan(&p.summary, &image);
+    let state = step.map(|n| timeline.state_at(n.min(timeline.len().saturating_sub(1))));
+    let view = match (&state, step) {
+        (Some(state), Some(n)) => {
+            let n = n.min(timeline.len().saturating_sub(1));
+            Some(StepView {
+                state,
+                narration: timeline.steps().get(n).map_or("", |s| s.narration.as_str()),
+                n,
+                total: timeline.len().saturating_sub(1),
+            })
+        }
+        _ => None,
+    };
     let frame = Frame {
         coverage: &p.coverage,
         image: &image,
         title: path,
         subtitle: &subtitle,
+        step: view,
     };
+
+    // A step frame is a picture of memory, so it is always drawn at the memory end.
+    if step.is_some() {
+        let svg = morph_svg(&frame, 1.0);
+        return match out_dir {
+            Some(dir) => write_file(std::path::Path::new(dir), &svg),
+            None => {
+                print!("{svg}");
+                ExitCode::SUCCESS
+            }
+        };
+    }
 
     if let Some(t) = single {
         let svg = morph_svg(&frame, t);

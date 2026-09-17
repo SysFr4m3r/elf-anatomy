@@ -3,7 +3,12 @@
 //! Rendering is hard to assert on. What can be pinned down is that the geometry is fed
 //! from a true partition of the file, and that the two endpoints say different things.
 
-#![allow(clippy::expect_used, clippy::panic, clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing
+)]
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +60,7 @@ fn the_endpoints_tell_different_stories() {
         image: &image,
         title: "hello-dyn",
         subtitle: "",
+        step: None,
     };
 
     let start = morph_svg(&frame, 0.0);
@@ -85,4 +91,47 @@ fn a_static_binary_still_maps() {
     let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
     assert!(!image.is_empty(), "a static binary has PT_LOADs too");
     assert!(image.zero_filled_bytes() > 0, "and it has .bss");
+}
+
+#[test]
+fn a_step_frame_shows_only_what_has_been_mapped_so_far() {
+    let Some(p) = parsed("hello-dyn") else {
+        eprintln!("no fixtures; run `make -C fixtures`");
+        return;
+    };
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
+    let timeline = elfa_model::Timeline::plan(&p.summary, &image);
+
+    let render_at = |n: usize| {
+        let state = timeline.state_at(n);
+        let svg = elfa_render::morph_svg(
+            &Frame {
+                coverage: &p.coverage,
+                image: &image,
+                title: "hello-dyn",
+                subtitle: "",
+                step: Some(elfa_render::StepView {
+                    state: &state,
+                    narration: timeline.steps()[n].narration.as_str(),
+                    n,
+                    total: timeline.len() - 1,
+                }),
+            },
+            1.0,
+        );
+        (svg, state)
+    };
+
+    // Step 0 is the kernel reading the first page: nothing is mapped, nothing written.
+    let (first, state0) = render_at(0);
+    assert!(state0.mappings.is_empty());
+    assert!(first.contains("step 0 /"));
+    assert!(!first.contains("#ffd166"), "no writes have happened yet");
+
+    // By the end the GOT has been written and the marks are drawn.
+    let last = timeline.len() - 1;
+    let (end, state_end) = render_at(last);
+    assert!(!state_end.poked.is_empty());
+    assert!(end.contains("#ffd166"), "poked addresses must be marked");
+    assert!(end.contains(&format!("step {last} /")));
 }

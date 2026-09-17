@@ -54,6 +54,25 @@ and read-write segments share a file page, so the kernel maps it at two addresse
 different protections. Both numbers are checked against `/proc/<pid>/maps`; see
 [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
 
+## The load, step by step
+
+```sh
+elfa steps fixtures/out/hello-dyn        # the modelled load as text
+elfa morph fixtures/out/hello-dyn --step 27 -o frame.svg
+```
+
+`steps` derives the whole sequence from the file: the kernel mapping segments and
+zero-filling `.bss`, `ld.so` resolving `DT_NEEDED`, relocations applied table by table with
+each write named, `PT_GNU_RELRO` sealing the GOT, initialisers, and the jump to `_start`.
+
+`morph --step N` draws memory as of that step — only what has been mapped so far,
+protections as they currently stand (the stripe left of the column), and a tick at every
+address written up to now.
+
+Lazy binding is modelled honestly: on a binary without `-z now`, `DT_JMPREL` relocations
+are *not* applied during the relocation pass, and the timeline says where they happen
+instead. Compare `fixtures/out/relr` with `fixtures/out/hello-dyn`.
+
 ## Observing a real load
 
 ```sh

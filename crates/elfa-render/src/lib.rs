@@ -20,8 +20,9 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
-use elfa_model::{MapSource, MemImage};
+use elfa_model::{MapSource, MemImage, State};
 use elfa_parse::{ClaimId, ClaimKind, Coverage, FileId, Span};
 
 const W: f64 = 1200.0;
@@ -157,6 +158,15 @@ pub fn runs(cov: &Coverage) -> Vec<Run> {
     out
 }
 
+/// A moment in the modelled load.
+#[derive(Clone, Copy, Debug)]
+pub struct StepView<'a> {
+    pub state: &'a State,
+    pub narration: &'a str,
+    pub n: usize,
+    pub total: usize,
+}
+
 /// Everything a frame needs besides the geometry.
 #[derive(Clone, Copy, Debug)]
 pub struct Frame<'a> {
@@ -164,6 +174,10 @@ pub struct Frame<'a> {
     pub image: &'a MemImage,
     pub title: &'a str,
     pub subtitle: &'a str,
+    /// When set, the memory side shows the image *as of this step*: only what has been
+    /// mapped so far, protections as they currently stand, and a mark at every address
+    /// written up to now.
+    pub step: Option<StepView<'a>>,
 }
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
@@ -233,6 +247,11 @@ pub fn morph_svg(frame: &Frame<'_>, t: f64) -> String {
         let fy1 = file_y(run.span.end());
         let mapped = frame.image.vaddr_of(run.span.start);
 
+        // A band reaches the memory side only once the step that maps it has run.
+        let mapped = match (mapped, frame.step) {
+            (Some(va), Some(view)) if view.state.prot_at(va).is_none() => None,
+            (m, _) => m,
+        };
         let is_mapped = mapped.is_some();
         let (x, y, h, opacity) = match mapped {
             Some(va) => {
@@ -281,6 +300,32 @@ pub fn morph_svg(frame: &Frame<'_>, t: f64) -> String {
         }
     }
 
+    // Protection as it currently stands. RELRO is visible here and nowhere else: a
+    // stripe that turns from write-green to read-blue partway through the load.
+    if let Some(view) = frame.step {
+        for m in &view.state.mappings {
+            let y0 = mem_y(m.vaddr);
+            let y1 = mem_y(m.end());
+            let colour = if m.prot.exec {
+                Class::Code.color()
+            } else if m.prot.write {
+                Class::Data.color()
+            } else {
+                Class::Header.color()
+            };
+            let _ = write_prot(&mut s, X_MEM - 24.0, y0, (y1 - y0).max(1.0), colour);
+        }
+        // Every address the loader has written so far. Short ticks rather than full-width
+        // bars: a GOT with a hundred entries would otherwise paint over the band it sits
+        // in, and which band it sits in is the interesting part.
+        for poke in &view.state.poked {
+            if poke.addr < lo || poke.addr >= hi {
+                continue;
+            }
+            let _ = write_poke(&mut s, X_MEM, mem_y(poke.addr) - 1.0);
+        }
+    }
+
     // .bss: present only on the memory side, so it grows from nothing.
     for m in frame.image.mappings() {
         if m.source != MapSource::ZeroFill {
@@ -312,18 +357,58 @@ pub fn morph_svg(frame: &Frame<'_>, t: f64) -> String {
 
     let pct = never_loaded as f64 * 100.0 / file_len;
     let zero = frame.image.zero_filled_bytes();
-    s.push_str(&format!(
-        r#"<text x="40" y="{cy}" fill="{MUTED}" font-size="13">{} of the file is never loaded   ·   {} bytes of memory come from no file</text>
-<rect x="40" y="{by}" width="{tot}" height="3" fill="{FG}" opacity="0.12"/>
-<rect x="40" y="{by}" width="{bw:.1}" height="3" fill="{FG}" opacity="0.55"/>
-</svg>
-"#,
-        format_args!("{pct:.1}%"),
-        zero,
-        cy = TOP + PLOT_H + 56.0,
-        by = TOP + PLOT_H + 76.0,
-        bw = (W - 80.0) * t,
-        tot = W - 80.0,
-    ));
+    let caption = match frame.step {
+        None => format!(
+            "{pct:.1}% of the file is never loaded   \u{b7}   {zero} bytes of memory come from no file"
+        ),
+        Some(view) => format!(
+            "step {} / {}   \u{b7}   {}   \u{b7}   {} addresses written so far",
+            view.n,
+            view.total,
+            view.narration,
+            view.state.poked.len()
+        ),
+    };
+    // The progress bar follows whichever axis this frame is scrubbing.
+    let bar = match frame.step {
+        None => t,
+        Some(view) if view.total > 0 => view.n as f64 / view.total as f64,
+        Some(_) => 0.0,
+    };
+
+    let cy = TOP + PLOT_H + 56.0;
+    let by = TOP + PLOT_H + 76.0;
+    let track = W - 80.0;
+    let _ = write!(
+        s,
+        concat!(
+            r#"<text x="40" y="{cy}" fill="{fg}" font-size="13">{caption}</text>"#,
+            "\n",
+            r#"<rect x="40" y="{by}" width="{track}" height="3" fill="{fg}" opacity="0.12"/>"#,
+            "\n",
+            r#"<rect x="40" y="{by}" width="{fill:.1}" height="3" fill="{fg}" opacity="0.55"/>"#,
+            "\n</svg>\n"
+        ),
+        cy = cy,
+        by = by,
+        fg = MUTED,
+        caption = esc(&caption),
+        track = track,
+        fill = track * bar,
+    );
     s
+}
+
+fn write_prot(s: &mut String, x: f64, y: f64, h: f64, colour: &str) -> core::fmt::Result {
+    writeln!(
+        s,
+        "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"9\" height=\"{h:.1}\" fill=\"{colour}\" opacity=\"0.85\"/>"
+    )
+}
+
+fn write_poke(s: &mut String, x: f64, y: f64) -> core::fmt::Result {
+    writeln!(
+        s,
+        "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"52\" height=\"2\" fill=\"#ffd166\" opacity=\"0.95\"/>"
+    )
 }

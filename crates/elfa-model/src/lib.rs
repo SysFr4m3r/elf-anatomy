@@ -99,7 +99,10 @@ pub struct Vma {
 /// A range of *file* bytes that ends up visible in memory, and where.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Resident {
+    /// Everything reachable through this segment, page rounding included.
     pub file: Span,
+    /// The segment's own `p_offset .. p_offset + p_filesz`, without the rounding.
+    pub exact: Span,
     /// Virtual address of `file.start`.
     pub vaddr: u64,
     pub segment: u32,
@@ -185,6 +188,7 @@ impl MemImage {
             if file_hi > file_lo {
                 resident.push(Resident {
                     file: Span::new(FileId::PRIMARY, file_lo, file_hi.saturating_sub(file_lo)),
+                    exact: Span::new(FileId::PRIMARY, seg.offset, seg.filesz),
                     vaddr: seg.vaddr.saturating_sub(page_off),
                     segment: idx,
                 });
@@ -267,13 +271,25 @@ impl MemImage {
     /// genuinely never loaded — section headers, symbol tables, debug info, and any
     /// padding large enough to fall outside every mapped page.
     ///
-    /// When a byte is mapped twice, the lowest address wins. `resident()` has both.
+    /// When a byte is mapped twice, the segment that *owns* it wins.
+    ///
+    /// Page rounding means a byte can be reachable through a segment it does not belong
+    /// to — `.dynamic` lives in the read-write segment but also appears in the read-only
+    /// segment's last page. Answering with the accidental address would put `.dynamic` at
+    /// an address where nothing reads it, and (worse) make it look unmapped whenever the
+    /// accidental mapping had not been created yet.
     #[must_use]
     pub fn vaddr_of(&self, offset: u64) -> Option<u64> {
+        let translate = |r: &Resident| r.vaddr.saturating_add(offset.saturating_sub(r.file.start));
         self.resident
             .iter()
-            .find(|r| offset >= r.file.start && offset < r.file.end())
-            .map(|r| r.vaddr.saturating_add(offset.saturating_sub(r.file.start)))
+            .find(|r| offset >= r.exact.start && offset < r.exact.end())
+            .or_else(|| {
+                self.resident
+                    .iter()
+                    .find(|r| offset >= r.file.start && offset < r.file.end())
+            })
+            .map(translate)
     }
 
     /// Lowest and highest virtual address in the image.
@@ -358,6 +374,23 @@ mod tests {
         assert_eq!(img.vaddr_of(0x3018), None);
         // And the leading partial page is pulled in whole.
         assert_eq!(img.vaddr_of(0x2000), Some(0x3000));
+    }
+
+    #[test]
+    fn a_byte_is_reported_at_the_address_of_the_segment_that_owns_it() {
+        let img = MemImage::from_segments(
+            &[
+                load(0x2000, 0x2000, 0x140, 0x140),
+                load(0x2db0, 0x3db0, 0x268, 0x690),
+            ],
+            0x4000,
+        );
+        // File 0x2db0 is .dynamic: it belongs to the read-write segment at 0x3db0, and is
+        // only reachable at 0x2db0 because the read-only segment's last page includes it.
+        assert_eq!(img.vaddr_of(0x2db0), Some(0x3db0));
+        // A byte that only the rounding reaches still gets the accidental answer, which
+        // is the truthful one: that is the only place it exists.
+        assert_eq!(img.vaddr_of(0x2500), Some(0x2500));
     }
 
     #[test]
