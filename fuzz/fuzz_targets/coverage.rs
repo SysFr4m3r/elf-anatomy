@@ -1,8 +1,9 @@
 //! The coverage invariant, fuzzed.
 //!
-//! In phase 1 this target's input will be an ELF file. Until the parser exists, it fuzzes
-//! the layer underneath: arbitrary claim sets pushed through the builder. Two properties,
-//! both of which the parser will depend on:
+//! `parse.rs` fuzzes the parser with real bytes. This one fuzzes the layer underneath it
+//! with arbitrary claim sets, which reaches shapes a valid ELF file never produces —
+//! deeply nested claims, parents that do not contain their children, spans at u16 extremes
+//! — and pins two properties the parser relies on:
 //!
 //! 1. **No panic, ever.** The builder takes spans derived from untrusted header fields,
 //!    and in the browser it takes them from a file the user dropped in. Malformed input

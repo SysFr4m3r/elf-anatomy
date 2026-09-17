@@ -51,11 +51,29 @@ jobs:
   fuzz:
     name: fuzz build + smoke
     runs-on: ubuntu-latest
+    env:
+      # rust-toolchain.toml pins stable, and a toolchain file beats the toolchain a
+      # workflow step installs. cargo-fuzz needs -Zsanitizer=address, so without this the
+      # job installs nightly and then builds with stable anyway. RUSTUP_TOOLCHAIN wins
+      # over the toolchain file and is inherited by the cargo that cargo-fuzz spawns,
+      # which `cargo +nightly` on the outer command alone would not achieve.
+      RUSTUP_TOOLCHAIN: nightly
+      # The workspace-wide -D warnings is for our code. cargo-fuzz compiles
+      # libfuzzer-sys and its C shim under instrumentation, and denying warnings there
+      # fails the build for code we do not own.
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked
       - run: cargo fuzz build
-      # Short run on every PR; the long campaigns run out of band.
+      # Seed the parser with real binaries. Starting from random bytes, a fuzzer spends
+      # its whole budget rediscovering \x7fELF.
+      - run: |
+          make -C fixtures all
+          mkdir -p fuzz/corpus/parse
+          cp fixtures/out/* /bin/true fuzz/corpus/parse/
+      # Short runs on every PR; long campaigns belong out of band.
+      - run: cargo fuzz run parse -- -max_total_time=60
       - run: cargo fuzz run coverage -- -max_total_time=60

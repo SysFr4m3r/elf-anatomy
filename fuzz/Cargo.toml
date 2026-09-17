@@ -13,6 +13,13 @@ arbitrary = { version = "1", features = ["derive"] }
 elfa-parse = { path = "../crates/elfa-parse" }
 
 [[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "coverage"
 path = "fuzz_targets/coverage.rs"
 test = false

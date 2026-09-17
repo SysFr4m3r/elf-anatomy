@@ -99,6 +99,11 @@ overlap means a size calculation is wrong. And whatever is left over is, by cons
 the part no structure explains: page-alignment padding, linker gaps, appended data. The
 findings above were not looked for. They are the remainder.
 
+Both properties are fuzzed. `cargo +nightly fuzz run parse` throws arbitrary bytes at the
+parser — seeded with real binaries, since from random bytes a fuzzer spends its whole
+budget rediscovering `\x7fELF` — and asserts independently of the builder's own validation
+that any successful parse tiles the file exactly.
+
 The parser is hand-written rather than built on `object` or `goblin`. Those crates give
 you the decoded meaning and discard the offsets, which is the right design for a linker
 and the wrong one here — the offsets are the product. Reads are bounds-checked and
