@@ -100,13 +100,17 @@ elfa diff fixtures/out/hello-dyn
   ok    relocation order       1 object(s) relocated before the program
   ok    initialiser order      program last, after 2
   ok    binding mode           BIND_NOW — PLT relocations applied before main
-  --    symbol binds           model: 7 for this object; observed: 95 process-wide
+  ok    symbol binds           all 3 named by relocations were bound; the loader resolved 6 more of its own
 ```
 
 The model reproduces the kernel's mapping table exactly — addresses, protections, file
-offsets and VMA boundaries — for every fixture and for `/bin/true` and `/bin/ls`. Areas the
-model does not claim anything about are marked `--` rather than passed silently: an
-unchecked area that looks checked is worse than a gap you can see.
+offsets and VMA boundaries — for every fixture and for `/bin/true` and `/bin/ls`.
+
+Checks are written to compare like with like, or not to claim a comparison at all. Symbol
+binds are checked by containment rather than equality, because the loader resolves symbols
+no relocation asked for and skips weak undefined ones that relocations do name — see
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md). Anything the model makes no claim about is
+marked `--` rather than passed silently.
 
 > **`elfa trace` executes the binary.** It is the only command here that does. Everything
 > else only reads bytes. Do not point it at something you would not run.

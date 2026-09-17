@@ -109,6 +109,9 @@ pub struct Reloc {
     pub r_type: u32,
     pub addend: i64,
     pub symbol: Option<Box<str>>,
+    /// The referenced symbol is weak-undefined. The loader does not fail on these and
+    /// does not report binding them: they resolve to zero and nothing happens.
+    pub weak: bool,
     pub file_span: Span,
 }
 
@@ -889,6 +892,7 @@ fn parse_relocs(
 
         let mut note = type_name;
         let mut sym_name: Option<Box<str>> = None;
+        let mut sym_weak = false;
         if sym_idx != 0
             && let Some(st) = symtab
         {
@@ -904,6 +908,10 @@ fn parse_relocs(
             if !name.is_empty() {
                 note = format!("{note} → {name}");
                 sym_name = Some(name.into());
+                // st_info >> 4 is the binding; STB_WEAK is 2.
+                let st_info = r.u8_at(sym_at.saturating_add(4)).unwrap_or(0);
+                let shndx = r.u16_at(sym_at.saturating_add(6)).unwrap_or(0);
+                sym_weak = (st_info >> 4) == 2 && shndx == 0;
             }
         }
 
@@ -917,6 +925,7 @@ fn parse_relocs(
                 0
             },
             symbol: sym_name,
+            weak: sym_weak,
             file_span: Span::new(F, at, entsize),
         });
 
@@ -965,6 +974,7 @@ fn parse_relr(
                 r_type: 8, // R_X86_64_RELATIVE
                 addend: 0,
                 symbol: None,
+                weak: false,
                 file_span: entry_span,
             });
             cursor = cursor.saturating_add(8);
@@ -979,6 +989,7 @@ fn parse_relr(
                         r_type: 8,
                         addend: 0,
                         symbol: None,
+                        weak: false,
                         file_span: entry_span,
                     });
                 }

@@ -286,6 +286,35 @@ impl Trace {
             .collect()
     }
 
+    /// Symbols bound *from* one object — the ones its own relocations needed.
+    ///
+    /// `bind_count` is process-wide and includes every dependency resolving its own
+    /// symbols, which is not comparable with a model that covers a single object.
+    #[must_use]
+    pub fn binds_from(&self, name_suffix: &str) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| match &s.kind {
+                StepKind::Bind { from, .. } => from.ends_with(name_suffix),
+                _ => false,
+            })
+            .count()
+    }
+
+    /// The symbols the loader bound on behalf of one object.
+    #[must_use]
+    pub fn bound_symbols(&self, name_suffix: &str) -> Vec<String> {
+        self.steps
+            .iter()
+            .filter_map(|s| match &s.kind {
+                StepKind::Bind { from, symbol, .. } if from.ends_with(name_suffix) => {
+                    Some(symbol.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn bind_count(&self) -> usize {
         self.steps
@@ -856,6 +885,18 @@ mod tests {
             .position(|s| matches!(s.kind, StepKind::Init { .. }))
             .expect("an init step");
         assert!(last_reloc < first_init);
+    }
+
+    #[test]
+    fn binds_are_attributable_to_the_object_that_needed_them() {
+        let trace = Trace {
+            steps: parse_ld_debug(SAMPLE),
+            ..Trace::default()
+        };
+        // One bind in the sample, and it is the program resolving fputs in libc.
+        assert_eq!(trace.binds_from("hello-dyn"), 1);
+        assert_eq!(trace.binds_from("libc.so.6"), 0);
+        assert_eq!(trace.bind_count(), 1);
     }
 
     #[test]

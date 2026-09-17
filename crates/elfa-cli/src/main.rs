@@ -850,21 +850,60 @@ fn compare(
         },
     });
 
-    // Symbol binding is deliberately not asserted equal: the trace counts every bind in
-    // the process, including libc's own and the vDSO's, and the model covers one object.
-    let model_syms = p
+    // Symbol binds. The two sides count different things and forcing the numbers to
+    // agree would be fitting the model to the measurement:
+    //
+    //   - The model has one entry per relocation that names a symbol. Some of those are
+    //     weak and undefined — `__gmon_start__`, the `_ITM_*` pair — and the loader
+    //     neither binds nor reports them; they resolve to zero and nothing happens.
+    //   - The trace has one entry per lookup the loader performed for this object, which
+    //     includes lookups no relocation asked for: `_r_debug`, and the malloc family,
+    //     which ld.so resolves against the global scope so a program can interpose them.
+    //
+    // So the check is containment, not equality: every non-weak symbol the relocations
+    // name must have been bound. The loader's extra lookups are reported, not judged.
+    let model_syms: Vec<&str> = p
         .summary
         .relocs
         .iter()
-        .filter(|r| r.symbol.is_some())
-        .count();
-    checks.push(Check {
-        name: "symbol binds",
-        verdict: Verdict::NotModelled,
-        detail: format!(
-            "model: {model_syms} for this object; observed: {} process-wide",
-            observed.bind_count()
-        ),
+        .filter(|r| {
+            !r.weak && (p.summary.bind_now || r.table != elfa_parse::RelocTableKind::JmpRel)
+        })
+        .filter_map(|r| r.symbol.as_deref())
+        .collect();
+    let bound = observed.bound_symbols(&stem);
+    let missing: Vec<&&str> = model_syms
+        .iter()
+        .filter(|s| !bound.iter().any(|b| b == **s))
+        .collect();
+    let extra = bound
+        .len()
+        .saturating_sub(model_syms.len().saturating_sub(missing.len()));
+
+    checks.push(if bound.is_empty() {
+        Check {
+            name: "symbol binds",
+            verdict: Verdict::NotModelled,
+            detail: format!(
+                "model names {}; the loader attributed no binds to this object",
+                model_syms.len()
+            ),
+        }
+    } else if missing.is_empty() {
+        Check {
+            name: "symbol binds",
+            verdict: Verdict::Match,
+            detail: format!(
+                "all {} named by relocations were bound; the loader resolved {extra} more of its own",
+                model_syms.len()
+            ),
+        }
+    } else {
+        Check {
+            name: "symbol binds",
+            verdict: Verdict::Differ,
+            detail: format!("never bound: {missing:?}"),
+        }
     });
 
     checks

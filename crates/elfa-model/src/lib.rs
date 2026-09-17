@@ -1066,6 +1066,7 @@ mod timeline_tests {
             r_type,
             addend: 0,
             symbol: None,
+            weak: false,
             file_span: Span::new(FileId::PRIMARY, 0, 24),
         }
     }

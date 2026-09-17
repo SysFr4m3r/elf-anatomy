@@ -181,3 +181,42 @@ checked against the glibc source.
 It matters because the error is in the flattering direction: a tool that reports the GOT as
 sealed when it is still writable is worse than one that says nothing. The unit test uses a
 synthetic segment with a mid-page end, since no fixture can exercise it.
+
+## 9. Relocations naming a symbol and symbols the loader binds are different sets
+
+The obvious check — does the model's symbol count equal the loader's — is wrong in both
+directions, and the error is consistent enough to look like an off-by-two.
+
+For `hello-dyn`, 7 relocations name a symbol and the loader reports 9 binds for the object:
+
+```
+model, from relocations        loader, from LD_DEBUG
+  __libc_start_main              __libc_start_main
+  __cxa_finalize                 __cxa_finalize
+  stdout        (COPY)           stdout
+  fputs         (JUMP_SLOT)      fputs
+  _ITM_deregisterTMCloneTable    calloc
+  _ITM_registerTMCloneTable      free
+  __gmon_start__                 malloc
+                                 realloc
+                                 _r_debug
+```
+
+Three in the model are **weak and undefined**. `__gmon_start__` and the `_ITM_*` pair have
+no definition anywhere; the loader resolves them to zero, does not fail, and prints no bind
+line. `Reloc::weak` records this, read from `st_info >> 4 == STB_WEAK` with `st_shndx ==
+SHN_UNDEF`.
+
+Five on the loader's side are lookups **no relocation asked for**. `_r_debug` is the
+debugger interface, and `malloc`/`calloc`/`free`/`realloc` are resolved against the global
+scope so a program can interpose them — `ld.so` needs its own reference to whichever
+definition wins.
+
+So `elfa diff` checks **containment**, not equality: every non-weak symbol a relocation
+names must appear in the loader's binds, and the loader's own extra lookups are reported
+rather than judged. Forcing the numbers to agree would have meant fitting the model to the
+measurement, which is the failure mode this whole document exists to prevent.
+
+On a lazily-bound object the extra count rises by one: the PLT symbol is excluded from the
+model's set (nothing is written before `main`) but the loader still binds it on first call,
+and the trace covers the whole process.
