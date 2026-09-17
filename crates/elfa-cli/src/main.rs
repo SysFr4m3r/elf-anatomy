@@ -559,7 +559,7 @@ fn report_trace(trace: &elfa_trace::Trace) {
 
     let reloc = trace.relocation_order();
     if !reloc.is_empty() {
-        println!("\n  relocation order — dependencies first, program after");
+        println!("\n  relocation order — dependencies first, the loader itself last");
         for o in &reloc {
             println!("    {o}");
         }

@@ -174,16 +174,57 @@ pub struct Trace {
 }
 
 impl Trace {
-    /// Objects in the order the loader first mentioned them.
+    /// SONAME → resolved path, from the searches the loader performed.
+    ///
+    /// The loader names the same object two ways: `libc.so.6` when something asks for it,
+    /// `/usr/lib/x86_64-linux-gnu/libc.so.6` once found. Listing both as separate objects
+    /// is wrong, and matching a model against a trace needs one canonical name.
+    ///
+    /// Heuristic: the resolved path is the last real path in the search list. `LD_DEBUG`
+    /// prints every path tried and does not mark which one succeeded, but a search that
+    /// does not end in success ends the process.
+    #[must_use]
+    pub fn aliases(&self) -> BTreeMap<String, String> {
+        let mut map = BTreeMap::new();
+        for s in &self.steps {
+            let StepKind::Search { library, tried } = &s.kind else {
+                continue;
+            };
+            if let Some(found) = tried
+                .iter()
+                .rev()
+                .find(|p| p.starts_with('/') && !p.contains("cache="))
+            {
+                map.insert(library.clone(), found.clone());
+            }
+        }
+        map
+    }
+
+    /// The name this trace should be indexed under: a resolved path where one is known.
+    #[must_use]
+    pub fn canonical(&self, name: &str) -> String {
+        self.aliases()
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_owned())
+    }
+
+    /// Objects in the order the loader first mentioned them, one entry each.
     ///
     /// Drawn from every step kind that names one, not just `LinkMap`: glibc emits
     /// "generating link map" only for objects it newly opens, so the executable itself
     /// and `ld.so` never appear there despite obviously being loaded.
     #[must_use]
     pub fn objects(&self) -> Vec<String> {
+        let aliases = self.aliases();
         let mut seen: Vec<String> = Vec::new();
         let push = |name: &str, seen: &mut Vec<String>| {
-            if !name.is_empty() && !seen.iter().any(|s| s == name) {
+            if name.is_empty() {
+                return;
+            }
+            let name = aliases.get(name).map_or(name, String::as_str);
+            if !seen.iter().any(|s| s == name) {
                 seen.push(name.to_owned());
             }
         };
@@ -664,7 +705,18 @@ pub fn to_json(trace: &Trace) -> String {
         s.push('}');
     }
 
-    s.push_str("],\"maps_at_interp\":");
+    s.push_str("],\"objects\":");
+    json_list(&trace.objects(), &mut s);
+    s.push_str(",\"aliases\":{");
+    for (i, (k, v)) in trace.aliases().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        json_str(k, &mut s);
+        s.push(':');
+        json_str(v, &mut s);
+    }
+    s.push_str("},\"maps_at_interp\":");
     maps_json(&trace.maps_at_interp, &mut s);
     s.push_str(",\"maps_at_entry\":");
     maps_json(&trace.maps_at_entry, &mut s);
@@ -784,6 +836,26 @@ mod tests {
             .position(|s| matches!(s.kind, StepKind::Init { .. }))
             .expect("an init step");
         assert!(last_reloc < first_init);
+    }
+
+    #[test]
+    fn a_soname_and_its_resolved_path_are_one_object() {
+        let trace = Trace {
+            steps: parse_ld_debug(SAMPLE),
+            ..Trace::default()
+        };
+        assert_eq!(
+            trace.canonical("libc.so.6"),
+            "/usr/lib/x86_64-linux-gnu/libc.so.6"
+        );
+        let objects = trace.objects();
+        assert_eq!(
+            objects.iter().filter(|o| o.contains("libc.so.6")).count(),
+            1,
+            "libc listed twice: {objects:?}"
+        );
+        // The ld.so.cache line is not a candidate path.
+        assert!(!trace.canonical("libc.so.6").contains("cache"));
     }
 
     #[test]
