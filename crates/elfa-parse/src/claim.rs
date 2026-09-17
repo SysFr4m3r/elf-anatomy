@@ -186,6 +186,21 @@ impl ClaimKind {
         }
     }
 
+    /// The struct field this claim is, when it is one.
+    ///
+    /// `label` groups claims by kind, which is what a renderer colours by. This is what a
+    /// reader needs: `e_phoff` and `e_shoff` are both `ehdr.field`, and the difference
+    /// between them is the entire point of looking.
+    #[must_use]
+    pub const fn field_name(&self) -> Option<&'static str> {
+        match self {
+            Self::FileHeaderField { name }
+            | Self::ProgramHeaderField { name, .. }
+            | Self::SectionHeaderField { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
     /// True for bytes that exist only to satisfy alignment or that nothing explains.
     /// These are the regions the byte river renders as absence.
     #[must_use]

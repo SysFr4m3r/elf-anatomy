@@ -28,3 +28,28 @@ modern binary.
 resolvers for `memcpy` and friends still run at startup, selecting implementations by CPU
 feature. Code executes before `main` even with no loader in the picture at all. `static-pie`
 goes further — 1103 `R_X86_64_RELATIVE` on top, applied by the program to itself.
+
+## Half of a hello-world is padding
+
+`fixtures/out/hello-dyn` is 18,632 bytes, of which **9,383 (50.4%) is not part of any
+structure**. Almost all of it is alignment:
+
+```
+0x00001175  3,723  after .fini, before .rodata      (page alignment)
+0x00002140  3,184  after .note.ABI-tag, before .init_array
+0x00000670  2,448  after .rela.plt, before .init    (page alignment)
+```
+
+Modern binutils defaults to `-z separate-code`, which splits the image into four
+page-aligned `PT_LOAD` segments (R, RX, R, RW) so that each gets its own protection. The
+file is laid out to match, and the padding between segments is the price. On an 18KB binary
+that price is half the file; on `/bin/ls` at 167KB it is 1.3%, because the padding is
+roughly constant and the content is not.
+
+The second gap is not page-aligned and is a different rule: `p_offset ≡ p_vaddr (mod
+page_size)` is required so a single `mmap` can place a segment at the right address. The RW
+segment sits at vaddr `0x3db0`, so it must start at a file offset congruent to `0xdb0` —
+hence the jump from `0x2140` to `0x2db0`.
+
+Neither of these is visible in `readelf` output. You get them for free from the coverage
+invariant: claim every byte, and the leftovers explain themselves.

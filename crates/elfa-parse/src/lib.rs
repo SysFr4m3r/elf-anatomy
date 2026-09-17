@@ -22,10 +22,10 @@
 //! padding, the linker gaps, the sections nobody reads, and the appended data that explain
 //! why a binary is the size it is.
 //!
-//! # Phase 0
+//! # Scope
 //!
-//! This crate currently defines the data model, the invariant, and the index. The ELF
-//! parser itself lands in phase 1; see `PROJECT_PLAN.md` §9.
+//! Phase 1a parses ELF64 little-endian. Other classes and byte orders are rejected by
+//! name rather than misparsed.
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -37,10 +37,15 @@ extern crate std;
 
 mod claim;
 mod coverage;
+pub mod elf;
 mod index;
+mod parse;
+mod reader;
 mod span;
 
 pub use claim::{Claim, ClaimId, ClaimKind, PadReason, RelocTableKind, Value, VersionTableKind};
 pub use coverage::{Coverage, CoverageBuilder, CoverageError, CoverageStats};
 pub use index::IntervalIndex;
+pub use parse::{ParseError, Parsed, Summary, parse};
+pub use reader::Reader;
 pub use span::{FileId, Span};

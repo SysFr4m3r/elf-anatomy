@@ -1,0 +1,18 @@
+[package]
+name = "elfa-cli"
+description = "Command-line front end for elf-anatomy."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "elfa"
+path = "src/main.rs"
+
+[dependencies]
+elfa-parse = { path = "../elfa-parse" }
+
+[lints]
+workspace = true
