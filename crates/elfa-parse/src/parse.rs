@@ -96,6 +96,22 @@ impl Segment {
     }
 }
 
+/// One relocation, decoded.
+///
+/// `DT_RELR` entries are expanded here: a bitmap word encodes up to 63 relative
+/// relocations, and the loader applies them individually, so the model must see them
+/// individually. `file_span` points at the entry (or the bitmap word) that produced this.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Reloc {
+    pub table: RelocTableKind,
+    /// `r_offset` — the address to be written.
+    pub offset: u64,
+    pub r_type: u32,
+    pub addend: i64,
+    pub symbol: Option<Box<str>>,
+    pub file_span: Span,
+}
+
 /// Header-level facts, pulled out so callers do not have to walk the claim tree to print
 /// a one-line description of a file.
 #[derive(Clone, Debug, Default)]
@@ -112,6 +128,10 @@ pub struct Summary {
     pub has_relr: bool,
     pub has_dynamic: bool,
     pub segments: Vec<Segment>,
+    pub relocs: Vec<Reloc>,
+    /// `DT_INIT`, and `DT_INIT_ARRAY` with its size — the code that runs before `main`.
+    pub init: Option<u64>,
+    pub init_array: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -702,11 +722,15 @@ fn parse_section_bodies(
             elf::SHT_SYMTAB | elf::SHT_DYNSYM => {
                 parse_symtab(r, b, body, sec, sections, idx)?;
             }
-            elf::SHT_RELA => parse_relocs(r, b, body, sec, sections, idx, true)?,
-            elf::SHT_REL => parse_relocs(r, b, body, sec, sections, idx, false)?,
+            elf::SHT_RELA => {
+                parse_relocs(r, b, body, sec, sections, idx, true, &name, summary)?;
+            }
+            elf::SHT_REL => {
+                parse_relocs(r, b, body, sec, sections, idx, false, &name, summary)?;
+            }
             elf::SHT_RELR => {
                 summary.has_relr = true;
-                parse_relr(r, b, body, sec, idx)?;
+                parse_relr(r, b, body, sec, idx, summary)?;
             }
             elf::SHT_DYNAMIC => parse_dynamic(r, b, body, sec, sections, idx, summary)?,
             elf::SHT_NOTE => parse_notes(r, b, body, sec, idx)?,
@@ -816,6 +840,7 @@ fn parse_symtab(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_relocs(
     r: &Reader<'_>,
     b: &mut CoverageBuilder,
@@ -824,7 +849,18 @@ fn parse_relocs(
     sections: &[SectionInfo],
     idx: u32,
     rela: bool,
+    name: &str,
+    summary: &mut Summary,
 ) -> Result<(), ParseError> {
+    // `.rela.plt` is DT_JMPREL: the same entry format, processed in its own pass and, on
+    // a lazy binary, not processed at startup at all.
+    let table = if name.ends_with(".plt") {
+        RelocTableKind::JmpRel
+    } else if rela {
+        RelocTableKind::Rela
+    } else {
+        RelocTableKind::Rel
+    };
     let default = if rela {
         elf::RELA64_SIZE
     } else {
@@ -852,6 +888,7 @@ fn parse_relocs(
             elf::r_x86_64_name(r_type).map_or_else(|| format!("type {r_type}"), ToOwned::to_owned);
 
         let mut note = type_name;
+        let mut sym_name: Option<Box<str>> = None;
         if sym_idx != 0
             && let Some(st) = symtab
         {
@@ -866,8 +903,22 @@ fn parse_relocs(
             let name = lookup(r, symstr, r.u32_at(sym_at).unwrap_or(0));
             if !name.is_empty() {
                 note = format!("{note} → {name}");
+                sym_name = Some(name.into());
             }
         }
+
+        summary.relocs.push(Reloc {
+            table,
+            offset: r_offset,
+            r_type,
+            addend: if rela {
+                r.i64_at(at.saturating_add(16)).unwrap_or(0)
+            } else {
+                0
+            },
+            symbol: sym_name,
+            file_span: Span::new(F, at, entsize),
+        });
 
         push(
             b,
@@ -893,13 +944,49 @@ fn parse_relr(
     parent: ClaimId,
     sec: &SectionInfo,
     idx: u32,
+    summary: &mut Summary,
 ) -> Result<(), ParseError> {
     let count = sec.size.checked_div(elf::RELR64_SIZE).unwrap_or(0);
+    // RELR is a run-length scheme: an even word is an address, an odd word is a bitmap of
+    // the 63 words that follow it. Expanded here because the loader applies each bit as
+    // its own relocation, and a timeline showing "one bitmap word" shows nothing.
+    let mut cursor = 0u64;
     for i in 0..count {
         let at = sec
             .offset
             .saturating_add(i.saturating_mul(elf::RELR64_SIZE));
         let word = r.u64_at(at).unwrap_or(0);
+        let entry_span = Span::new(F, at, elf::RELR64_SIZE);
+        if word & 1 == 0 {
+            cursor = word;
+            summary.relocs.push(Reloc {
+                table: RelocTableKind::Relr,
+                offset: cursor,
+                r_type: 8, // R_X86_64_RELATIVE
+                addend: 0,
+                symbol: None,
+                file_span: entry_span,
+            });
+            cursor = cursor.saturating_add(8);
+        } else {
+            let mut bits = word >> 1;
+            let mut addr = cursor;
+            while bits != 0 {
+                if bits & 1 != 0 {
+                    summary.relocs.push(Reloc {
+                        table: RelocTableKind::Relr,
+                        offset: addr,
+                        r_type: 8,
+                        addend: 0,
+                        symbol: None,
+                        file_span: entry_span,
+                    });
+                }
+                addr = addr.saturating_add(8);
+                bits >>= 1;
+            }
+            cursor = cursor.saturating_add(63 * 8);
+        }
         // Even words are addresses; odd words are bitmaps covering the following 63
         // words. One 8-byte word can encode 63 relocations that RELA would spend 1512
         // bytes on.
@@ -965,6 +1052,14 @@ fn parse_dynamic(
             elf::DT_FLAGS if val & elf::DF_BIND_NOW != 0 => {
                 summary.bind_now = true;
                 note = format!("{note} BIND_NOW");
+            }
+            elf::DT_INIT => summary.init = Some(val),
+            elf::DT_INIT_ARRAY => {
+                summary.init_array = Some((val, summary.init_array.map_or(0, |(_, s)| s)));
+            }
+            elf::DT_INIT_ARRAYSZ => {
+                let base = summary.init_array.map_or(0, |(a, _)| a);
+                summary.init_array = Some((base, val));
             }
             elf::DT_NULL => {
                 if !seen_null {

@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use elfa_model::{MapSource, MemImage};
+use elfa_model::{MapSource, MemImage, Timeline};
 use elfa_parse::{ClaimId, ClaimKind, Coverage, Parsed, Span, Value, elf, parse};
 use elfa_render::{Frame, morph_svg};
 
@@ -22,6 +22,7 @@ USAGE
   elfa map <file>                what the kernel maps, and what it leaves behind
   elfa morph <file> [-o DIR]     the file→memory morph as SVG frames (--frames N, --t X)
   elfa trace <file> [-o FILE]    run it and record what the real loader did (--json)
+  elfa steps <file>              the modelled load, step by step (--limit N, --phase P)
 ";
 
 fn main() -> ExitCode {
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
         "map" => cmd_map(&rest),
         "morph" => cmd_morph(&rest),
         "trace" => cmd_trace(&rest),
+        "steps" => cmd_steps(&rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -482,6 +484,71 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
         }
     }
     println!("{frames} frames in {dir}/");
+    ExitCode::SUCCESS
+}
+
+fn cmd_steps(args: &[&str]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let mut limit = usize::MAX;
+    let mut phase: Option<&str> = None;
+    let mut i = 1;
+    while let Some(arg) = args.get(i) {
+        match *arg {
+            "--limit" => {
+                limit = args
+                    .get(i.saturating_add(1))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(limit);
+                i = i.saturating_add(1);
+            }
+            "--phase" => {
+                phase = args.get(i.saturating_add(1)).copied();
+                i = i.saturating_add(1);
+            }
+            other => {
+                eprintln!("unknown flag `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+
+    let Some(p) = load(path) else {
+        return ExitCode::FAILURE;
+    };
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
+    let timeline = Timeline::plan(&p.summary, &image);
+
+    println!("{path}  {} steps modelled\n", timeline.len());
+
+    let mut last_phase = None;
+    let mut shown = 0usize;
+    for step in timeline.steps() {
+        if phase.is_some_and(|p| p != step.phase.as_str()) {
+            continue;
+        }
+        if shown >= limit {
+            println!("    … {} more steps", timeline.len().saturating_sub(shown));
+            break;
+        }
+        if last_phase != Some(step.phase) {
+            println!("  {} · {}", step.phase.as_str(), step.actor.as_str());
+            last_phase = Some(step.phase);
+        }
+        println!("    {:>4}  {}", step.n, step.narration);
+        shown = shown.saturating_add(1);
+    }
+
+    let end = timeline.state_at(timeline.len());
+    println!(
+        "\n  at the end: {} mappings, {} addresses written before the program ran",
+        end.mappings.len(),
+        end.poked.len()
+    );
+    println!();
     ExitCode::SUCCESS
 }
 

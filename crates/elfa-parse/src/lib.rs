@@ -46,6 +46,6 @@ mod span;
 pub use claim::{Claim, ClaimId, ClaimKind, PadReason, RelocTableKind, Value, VersionTableKind};
 pub use coverage::{Coverage, CoverageBuilder, CoverageError, CoverageStats};
 pub use index::IntervalIndex;
-pub use parse::{ParseError, Parsed, Segment, Summary, parse};
+pub use parse::{ParseError, Parsed, Reloc, Segment, Summary, parse};
 pub use reader::Reader;
 pub use span::{FileId, Span};

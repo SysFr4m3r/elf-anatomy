@@ -48,7 +48,11 @@ pub const DT_STRTAB: u64 = 5;
 pub const DT_SONAME: u64 = 14;
 pub const DT_RPATH: u64 = 15;
 pub const DT_RUNPATH: u64 = 29;
+pub const DT_INIT: u64 = 12;
+pub const DT_INIT_ARRAY: u64 = 25;
+pub const DT_INIT_ARRAYSZ: u64 = 27;
 pub const DT_FLAGS: u64 = 30;
+pub const PT_GNU_RELRO: u32 = 0x6474_e552;
 pub const DF_BIND_NOW: u64 = 0x8;
 
 #[must_use]

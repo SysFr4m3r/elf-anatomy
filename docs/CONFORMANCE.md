@@ -112,3 +112,14 @@ steps at all. Static binaries have no loader to observe and are rejected outrigh
 `elfa map` prints `p_vaddr` as written in the file, starting at `0x0`. A real process has a
 randomised load base (`0x558fc5b5e000` above). Comparisons must be base-relative, and the
 base has to be recovered from the observed trace rather than assumed.
+
+## 5. Modelled mappings are segment-exact; VMAs are page-rounded and merged
+
+`Timeline::state_at` returns `Mapping`s with exact extents — `.bss` is its own entry even
+though it shares a page, and a mapping is not merged with its neighbour just because they
+ended up with the same protection. The kernel does both.
+
+For `hello-dyn` the model ends with 6 mappings and `/proc` shows 5. Neither is wrong; they
+are different views. Before the phase 4 diff can compare them it needs a
+`State::vmas()` — page-round each mapping, then merge adjacent runs with equal
+protection — and the comparison must be made on that, not on the raw list.

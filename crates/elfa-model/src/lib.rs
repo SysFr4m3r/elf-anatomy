@@ -14,7 +14,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use elfa_parse::{FileId, Segment, Span};
+use elfa_parse::{FileId, RelocTableKind, Segment, Span};
 
 /// `mmap` granularity. Everything the kernel does to an image is in these units, and
 /// forgetting that is the difference between "never loaded" and "loaded by accident".
@@ -395,5 +395,647 @@ mod tests {
     fn protection_comes_from_the_flag_bits() {
         assert_eq!(Prot::from_flags(PF_R | PF_X).as_str(), "r-x");
         assert_eq!(Prot::from_flags(PF_R | PF_W).as_str(), "rw-");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The timeline
+// ---------------------------------------------------------------------------
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use elfa_parse::{Reloc, Summary};
+
+const PT_GNU_RELRO: u32 = 0x6474_e552;
+
+/// Which part of the load a step belongs to. Mirrors `PROJECT_PLAN.md` §5.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Phase {
+    Kernel,
+    Interp,
+    Resolve,
+    Relocate,
+    Protect,
+    Init,
+    Entry,
+}
+
+impl Phase {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kernel => "kernel",
+            Self::Interp => "interp",
+            Self::Resolve => "resolve",
+            Self::Relocate => "relocate",
+            Self::Protect => "protect",
+            Self::Init => "init",
+            Self::Entry => "entry",
+        }
+    }
+}
+
+/// Who is doing the work. The distinction matters: the kernel's half of a load happens
+/// before any userspace code of the program's has run at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Actor {
+    Kernel,
+    Interp,
+    Program,
+}
+
+impl Actor {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kernel => "kernel",
+            Self::Interp => "ld.so",
+            Self::Program => "program",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PokeCause {
+    /// A relocation wrote an address into memory.
+    Relocation { r_type: u32 },
+    /// A pointer to an initialiser was read and called.
+    InitPointer,
+}
+
+/// A write into the image, attributed to the step that made it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Poke {
+    pub addr: u64,
+    pub len: u8,
+    pub cause: PokeCause,
+}
+
+/// What a step does to the image.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Effect {
+    Map(Mapping),
+    Protect { start: u64, len: u64, to: Prot },
+    Write(Poke),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Step {
+    pub n: u32,
+    pub phase: Phase,
+    pub actor: Actor,
+    pub narration: String,
+    /// File bytes this step consults. Drives the byte-river highlight.
+    pub reads: Vec<Span>,
+    pub effects: Vec<Effect>,
+}
+
+/// A step before it has been numbered.
+type Pending = (Phase, Actor, String, Vec<Span>, Vec<Effect>);
+
+/// The modelled load, as an ordered list of steps.
+///
+/// Scope, deliberately: this models the **main object**. Dependencies are named as they
+/// are resolved but not themselves mapped or relocated — doing that means loading and
+/// parsing libc, which is real work and belongs in its own pass. What is here is already
+/// checkable against an observed trace, and being checkable is the point.
+#[derive(Clone, Debug, Default)]
+pub struct Timeline {
+    steps: Vec<Step>,
+}
+
+/// Carve `[lo, hi)` out of a mapping, keeping its file source aligned.
+fn slice(m: &Mapping, lo: u64, hi: u64, prot: Prot) -> Mapping {
+    let source = match m.source {
+        MapSource::FromFile(span) => MapSource::FromFile(Span::new(
+            span.file,
+            span.start.saturating_add(lo.saturating_sub(m.vaddr)),
+            hi.saturating_sub(lo),
+        )),
+        MapSource::ZeroFill => MapSource::ZeroFill,
+    };
+    Mapping {
+        vaddr: lo,
+        len: hi.saturating_sub(lo),
+        prot,
+        source,
+        segment: m.segment,
+    }
+}
+
+/// The image as of some step.
+#[derive(Clone, Debug, Default)]
+pub struct State {
+    pub mappings: Vec<Mapping>,
+    /// Addresses written so far, in the order they were written.
+    pub poked: Vec<Poke>,
+}
+
+impl State {
+    /// Protection in force at an address, if it is mapped at all.
+    #[must_use]
+    pub fn prot_at(&self, addr: u64) -> Option<Prot> {
+        self.mappings
+            .iter()
+            .find(|m| addr >= m.vaddr && addr < m.end())
+            .map(|m| m.prot)
+    }
+}
+
+impl Timeline {
+    #[must_use]
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// Replay effects `0..=n`.
+    ///
+    /// State is derived rather than stored, so scrubbing backwards costs the same as
+    /// scrubbing forwards and there is no way for the two to disagree.
+    #[must_use]
+    pub fn state_at(&self, n: usize) -> State {
+        let mut state = State::default();
+        for step in self.steps.iter().take(n.saturating_add(1)) {
+            for effect in &step.effects {
+                match effect {
+                    Effect::Map(m) => state.mappings.push(*m),
+                    Effect::Write(p) => state.poked.push(*p),
+                    Effect::Protect { start, len, to } => {
+                        // `mprotect` splits a mapping rather than recolouring it. This is
+                        // why a hardened binary has more VMAs than it has segments, and
+                        // modelling it as a recolour makes the mapping counts disagree
+                        // with /proc for reasons that look like a bug in the diff.
+                        let end = start.saturating_add(*len);
+                        let mut out = Vec::with_capacity(state.mappings.len());
+                        for m in state.mappings.drain(..) {
+                            if m.end() <= *start || m.vaddr >= end {
+                                out.push(m);
+                                continue;
+                            }
+                            if m.vaddr < *start {
+                                out.push(slice(&m, m.vaddr, *start, m.prot));
+                            }
+                            let mid_lo = m.vaddr.max(*start);
+                            let mid_hi = m.end().min(end);
+                            out.push(slice(&m, mid_lo, mid_hi, *to));
+                            if m.end() > end {
+                                out.push(slice(&m, end, m.end(), m.prot));
+                            }
+                        }
+                        out.sort_unstable_by_key(|m| (m.vaddr, m.len));
+                        state.mappings = out;
+                    }
+                }
+            }
+        }
+        state
+    }
+
+    /// Build the timeline for one object.
+    #[must_use]
+    pub fn plan(summary: &Summary, image: &MemImage) -> Self {
+        let mut steps: Vec<Pending> = Vec::new();
+
+        let mut push = |phase, actor, narration: String, reads: Vec<Span>, effects| {
+            steps.push((phase, actor, narration, reads, effects));
+        };
+
+        // --- the kernel ---
+        push(
+            Phase::Kernel,
+            Actor::Kernel,
+            "read the first page and check e_ident: magic, class, byte order, machine".to_string(),
+            alloc::vec![Span::new(FileId::PRIMARY, 0, 64)],
+            Vec::new(),
+        );
+
+        if let Some(interp) = &summary.interp {
+            push(
+                Phase::Kernel,
+                Actor::Kernel,
+                format!("PT_INTERP names {interp} — this program needs a loader"),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+
+        for m in image.mappings() {
+            let narration = match m.source {
+                MapSource::FromFile(span) => format!(
+                    "map segment {}: file {:#x}..{:#x} → {:#x} {}",
+                    m.segment,
+                    span.start,
+                    span.end(),
+                    m.vaddr,
+                    m.prot.as_str()
+                ),
+                MapSource::ZeroFill => format!(
+                    "zero-fill {:#x}..{:#x} — p_memsz beyond p_filesz, this is .bss and it is in no file",
+                    m.vaddr,
+                    m.end()
+                ),
+            };
+            let reads = match m.source {
+                MapSource::FromFile(span) => alloc::vec![span],
+                MapSource::ZeroFill => Vec::new(),
+            };
+            push(
+                Phase::Kernel,
+                Actor::Kernel,
+                narration,
+                reads,
+                alloc::vec![Effect::Map(*m)],
+            );
+        }
+
+        push(
+            Phase::Kernel,
+            Actor::Kernel,
+            "build the stack: argv, envp, and the auxiliary vector (AT_PHDR, AT_BASE, AT_ENTRY, AT_RANDOM)"
+                .to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        if summary.interp.is_some() {
+            push(
+                Phase::Kernel,
+                Actor::Kernel,
+                "jump to the *interpreter's* entry — the program's own entry does not run first"
+                    .to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+            push(
+                Phase::Interp,
+                Actor::Interp,
+                "ld.so relocates itself before it can touch a global variable".to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+            push(
+                Phase::Interp,
+                Actor::Interp,
+                "read PT_DYNAMIC: the table that drives everything after this point".to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+
+        for needed in &summary.needed {
+            push(
+                Phase::Resolve,
+                Actor::Interp,
+                format!(
+                    "DT_NEEDED {needed}: search DT_RPATH, LD_LIBRARY_PATH, DT_RUNPATH, ld.so.cache, then the default directories"
+                ),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+
+        if !summary.needed.is_empty() {
+            push(
+                Phase::Resolve,
+                Actor::Interp,
+                "build the global symbol scope — first definition wins, and LD_PRELOAD goes in ahead of the dependencies"
+                    .to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+
+        // --- relocation, in the order glibc applies the tables ---
+        let mut deferred_plt = 0usize;
+        for table in [
+            RelocTableKind::Relr,
+            RelocTableKind::Rela,
+            RelocTableKind::Rel,
+            RelocTableKind::JmpRel,
+        ] {
+            let group: Vec<&Reloc> = summary.relocs.iter().filter(|r| r.table == table).collect();
+            if group.is_empty() {
+                continue;
+            }
+            // Under lazy binding the PLT relocations are *not* applied here. Listing
+            // them as writes in this pass would be the 2008 animation: it is the thing
+            // §0.6 exists to avoid.
+            let lazy = table == RelocTableKind::JmpRel && !summary.bind_now;
+            push(
+                Phase::Relocate,
+                Actor::Interp,
+                format!(
+                    "{}: {}{}",
+                    table_name(table),
+                    plural(group.len(), "relocation"),
+                    if lazy {
+                        " — lazy, so nothing is written yet"
+                    } else {
+                        ""
+                    }
+                ),
+                Vec::new(),
+                Vec::new(),
+            );
+            if lazy {
+                deferred_plt = group.len();
+                continue;
+            }
+            for r in group {
+                let what = elfa_parse::elf::r_x86_64_name(r.r_type)
+                    .map_or_else(|| format!("type {}", r.r_type), ToString::to_string);
+                let sym = r
+                    .symbol
+                    .as_deref()
+                    .map_or_else(String::new, |s| format!(" → {s}"));
+                push(
+                    Phase::Relocate,
+                    Actor::Interp,
+                    format!("write {:#x}: {what}{sym}", r.offset),
+                    alloc::vec![r.file_span],
+                    alloc::vec![Effect::Write(Poke {
+                        addr: r.offset,
+                        len: 8,
+                        cause: PokeCause::Relocation { r_type: r.r_type },
+                    })],
+                );
+            }
+        }
+
+        // --- RELRO ---
+        if let Some(relro) = summary.segments.iter().find(|s| s.p_type == PT_GNU_RELRO) {
+            let start = page_down(relro.vaddr);
+            let end = page_up(relro.vaddr.saturating_add(relro.memsz));
+            push(
+                Phase::Protect,
+                Actor::Interp,
+                format!(
+                    "mprotect {:#x}..{:#x} read-only — PT_GNU_RELRO: the GOT is sealed now that relocation is done",
+                    start, end
+                ),
+                Vec::new(),
+                alloc::vec![Effect::Protect {
+                    start,
+                    len: end.saturating_sub(start),
+                    to: Prot {
+                        read: true,
+                        write: false,
+                        exec: false,
+                    },
+                }],
+            );
+        }
+
+        // --- initialisers ---
+        if let Some(init) = summary.init {
+            push(
+                Phase::Init,
+                Actor::Interp,
+                format!("call DT_INIT at {init:#x}"),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+        if let Some((addr, size)) = summary.init_array
+            && size > 0
+        {
+            let count = size / 8;
+            push(
+                Phase::Init,
+                Actor::Interp,
+                format!(
+                    "run DT_INIT_ARRAY at {addr:#x}: {} — C++ static constructors and __attribute__((constructor)) live here",
+                    plural(count as usize, "initialiser")
+                ),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+
+        push(
+            Phase::Entry,
+            Actor::Program,
+            format!(
+                "transfer control to {:#x}: _start → __libc_start_main → main",
+                summary.entry
+            ),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        if deferred_plt > 0 {
+            push(
+                Phase::Entry,
+                Actor::Program,
+                format!(
+                    "first call through each PLT stub traps into _dl_runtime_resolve, which patches the GOT: {} still unresolved as main begins",
+                    plural(deferred_plt, "entry")
+                ),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+
+        Self {
+            steps: steps
+                .into_iter()
+                .enumerate()
+                .map(|(i, (phase, actor, narration, reads, effects))| Step {
+                    n: u32::try_from(i).unwrap_or(u32::MAX),
+                    phase,
+                    actor,
+                    narration,
+                    reads,
+                    effects,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// English, so the narration does not say "1 relocations".
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else if let Some(stem) = noun.strip_suffix('y') {
+        format!("{n} {stem}ies")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+const fn table_name(t: RelocTableKind) -> &'static str {
+    match t {
+        RelocTableKind::Rel => "DT_REL",
+        RelocTableKind::Rela => "DT_RELA",
+        RelocTableKind::Relr => "DT_RELR",
+        RelocTableKind::JmpRel => "DT_JMPREL",
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::expect_used
+)]
+mod timeline_tests {
+    use super::*;
+    use elfa_parse::{RelocTableKind, Summary};
+
+    fn seg(p_type: u32, offset: u64, vaddr: u64, filesz: u64, memsz: u64, flags: u32) -> Segment {
+        Segment {
+            p_type,
+            flags,
+            offset,
+            vaddr,
+            filesz,
+            memsz,
+            align: 0x1000,
+        }
+    }
+
+    fn reloc(table: RelocTableKind, offset: u64, r_type: u32) -> elfa_parse::Reloc {
+        elfa_parse::Reloc {
+            table,
+            offset,
+            r_type,
+            addend: 0,
+            symbol: None,
+            file_span: Span::new(FileId::PRIMARY, 0, 24),
+        }
+    }
+
+    fn summary(bind_now: bool) -> Summary {
+        Summary {
+            entry: 0x1050,
+            interp: Some("/lib64/ld-linux-x86-64.so.2".into()),
+            bind_now,
+            has_dynamic: true,
+            segments: alloc::vec![
+                seg(PT_LOAD, 0, 0, 0x670, 0x670, PF_R),
+                seg(PT_LOAD, 0x2db0, 0x3db0, 0x268, 0x690, PF_R | PF_W),
+                seg(PT_GNU_RELRO, 0x2db0, 0x3db0, 0x250, 0x250, PF_R),
+            ],
+            relocs: alloc::vec![
+                reloc(RelocTableKind::Relr, 0x3db0, 8),
+                reloc(RelocTableKind::JmpRel, 0x4000, 7),
+            ],
+            ..Summary::default()
+        }
+    }
+
+    fn plan(bind_now: bool) -> (Timeline, Summary) {
+        let s = summary(bind_now);
+        let image = MemImage::from_segments(&s.segments, 0x4000);
+        (Timeline::plan(&s, &image), s)
+    }
+
+    #[test]
+    fn lazy_binding_writes_nothing_during_relocation() {
+        let (tl, _) = plan(false);
+        let writes: Vec<u64> = tl
+            .steps()
+            .iter()
+            .flat_map(|s| s.effects.iter())
+            .filter_map(|e| match e {
+                Effect::Write(p) => Some(p.addr),
+                _ => None,
+            })
+            .collect();
+        // The RELR relocation is applied; the PLT one is not.
+        assert_eq!(writes, alloc::vec![0x3db0]);
+
+        // And the timeline says where it went instead.
+        assert!(
+            tl.steps()
+                .iter()
+                .any(|s| s.narration.contains("_dl_runtime_resolve")),
+            "lazy PLT must be accounted for after control transfers"
+        );
+    }
+
+    #[test]
+    fn bind_now_applies_the_plt_relocations_up_front() {
+        let (tl, _) = plan(true);
+        let writes: Vec<u64> = tl
+            .steps()
+            .iter()
+            .flat_map(|s| s.effects.iter())
+            .filter_map(|e| match e {
+                Effect::Write(p) => Some(p.addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes, alloc::vec![0x3db0, 0x4000]);
+        assert!(
+            !tl.steps()
+                .iter()
+                .any(|s| s.narration.contains("_dl_runtime_resolve"))
+        );
+    }
+
+    #[test]
+    fn relro_seals_its_own_range_and_splits_the_mapping() {
+        let (tl, _) = plan(true);
+        let protect_at = tl
+            .steps()
+            .iter()
+            .position(|s| s.phase == Phase::Protect)
+            .expect("a protect step");
+
+        let before = tl.state_at(protect_at - 1);
+        let after = tl.state_at(protect_at);
+
+        // The GOT and .init_array live here: writable during relocation, sealed after.
+        assert!(before.prot_at(0x3db0).expect("mapped").write);
+        assert!(!after.prot_at(0x3db0).expect("mapped").write);
+
+        // .bss is past the RELRO range and must stay writable — a model that seals the
+        // whole segment would break every program that has a global variable.
+        assert!(after.prot_at(0x4100).expect("mapped").write);
+
+        // mprotect splits, so there is one more mapping than before.
+        assert!(
+            after.mappings.len() > before.mappings.len(),
+            "expected a split: {:?}",
+            after.mappings
+        );
+    }
+
+    #[test]
+    fn the_loader_changes_protection_but_never_what_is_mapped() {
+        let (tl, _) = plan(true);
+        let kernel_end = tl
+            .steps()
+            .iter()
+            .rposition(|s| s.phase == Phase::Kernel)
+            .expect("kernel steps");
+        let end = tl.len().saturating_sub(1);
+
+        let bytes = |st: &State| -> u64 { st.mappings.iter().map(|m| m.len).sum() };
+        // Everything the process will ever have is mapped by the time the kernel is
+        // done. The loader splits and re-protects; it does not add address space.
+        assert_eq!(bytes(&tl.state_at(kernel_end)), bytes(&tl.state_at(end)));
+        // But it does change how many mappings that takes.
+        assert!(tl.state_at(end).mappings.len() > tl.state_at(kernel_end).mappings.len());
+    }
+
+    #[test]
+    fn narration_counts_in_english() {
+        assert_eq!(plural(1, "relocation"), "1 relocation");
+        assert_eq!(plural(2, "relocation"), "2 relocations");
+        assert_eq!(plural(1, "entry"), "1 entry");
+        assert_eq!(plural(3, "entry"), "3 entries");
     }
 }
