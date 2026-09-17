@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  no_std:
+    name: no_std builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      # The parser runs in a browser via wasm and, in principle, anywhere else.
+      # `std` is a convenience feature, and this job is what keeps that true.
+      - run: cargo build -p elfa-parse --no-default-features --target x86_64-unknown-none
+
+  fixtures:
+    name: specimen matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C fixtures all
+      - run: make -C fixtures check
+      # Printed into the job log so a toolchain change that alters the specimens
+      # (a new default for -z now, a linker that starts emitting DT_RELR) is
+      # visible in the diff of CI output rather than discovered in phase 3.
+      - run: make -C fixtures summary
+
+  fuzz:
+    name: fuzz build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo fuzz build
+      # Short run on every PR; the long campaigns run out of band.
+      - run: cargo fuzz run coverage -- -max_total_time=60

@@ -1,0 +1,4 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# wasm32-unknown-unknown is added in phase 1, when there is something to compile to it.

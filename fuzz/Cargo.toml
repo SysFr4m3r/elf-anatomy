@@ -1,0 +1,23 @@
+[package]
+name = "elfa-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+elfa-parse = { path = "../crates/elfa-parse" }
+
+[[bin]]
+name = "coverage"
+path = "fuzz_targets/coverage.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

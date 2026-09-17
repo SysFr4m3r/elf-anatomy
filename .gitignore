@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# cargo-fuzz
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+
+# Trunk / wasm output (phase 1+)
+/dist/
+/www/dist/
+
+# Fixture build output — regenerate with `make -C fixtures`
+/fixtures/out/
+*.o
+
+# Observed traces are generated; committed ones live in fixtures/traces/
+/fixtures/*.trace.json
+
+# Planning doc — local only
+/PROJECT_PLAN.md
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
