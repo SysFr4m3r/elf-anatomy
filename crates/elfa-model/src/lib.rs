@@ -505,12 +505,13 @@ impl Actor {
     }
 }
 
+/// Why an address was written.
+///
+/// Only relocations for now. Initialisers are narrated but produce no pokes: modelling
+/// what a constructor writes would mean executing it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PokeCause {
-    /// A relocation wrote an address into memory.
     Relocation { r_type: u32 },
-    /// A pointer to an initialiser was read and called.
-    InitPointer,
 }
 
 /// A write into the image, attributed to the step that made it.

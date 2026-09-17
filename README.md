@@ -111,8 +111,14 @@ x86-64 ELF64 little-endian. The timeline models the main object: dependencies ar
 they resolve but not themselves mapped or relocated. `elfa trace` needs glibc, since
 `LD_DEBUG` is a glibc feature, and Linux, since it reads `/proc`.
 
-More in [docs/FORMAT-NOTES.md](docs/FORMAT-NOTES.md) (what the specimens taught us that the
-spec does not say plainly) and [docs/RENDERING.md](docs/RENDERING.md).
+## Documentation
+
+| | |
+|---|---|
+| [docs/MODEL.md](docs/MODEL.md) | The step list, phase by phase, and what is out of scope |
+| [docs/CONFORMANCE.md](docs/CONFORMANCE.md) | Every place the model and a real `ld.so` disagreed |
+| [docs/FORMAT-NOTES.md](docs/FORMAT-NOTES.md) | What the specimens taught us that the spec does not say plainly |
+| [docs/RENDERING.md](docs/RENDERING.md) | Why the renderer is headless first |
 
 ## License
 
