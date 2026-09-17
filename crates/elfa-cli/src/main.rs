@@ -12,6 +12,36 @@ use elfa_model::{MapSource, MemImage, Prot, Timeline};
 use elfa_parse::{ClaimId, ClaimKind, Coverage, Parsed, Span, Value, elf, parse};
 use elfa_render::{Frame, StepView, morph_svg};
 
+/// `println!` that exits quietly when the reader goes away.
+///
+/// `elfa dump /bin/ls | head` closes the pipe as soon as it has ten lines. The standard
+/// `println!` panics on the resulting `EPIPE` and prints a Rust backtrace note over the
+/// user's terminal, for what is ordinary shell usage. `head`-ing a long listing is exactly
+/// how someone explores a 1,200-claim tree.
+macro_rules! outln {
+    () => { outln!("") };
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = writeln!(std::io::stdout(), $($arg)*)
+            && e.kind() == std::io::ErrorKind::BrokenPipe
+        {
+            std::process::exit(0);
+        }
+    }};
+}
+
+/// `print!`, with the same treatment.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = write!(std::io::stdout(), $($arg)*)
+            && e.kind() == std::io::ErrorKind::BrokenPipe
+        {
+            std::process::exit(0);
+        }
+    }};
+}
+
 const USAGE: &str = "\
 elfa — look at what is actually in an ELF file
 
@@ -45,7 +75,7 @@ fn main() -> ExitCode {
         "steps" => cmd_steps(&rest),
         "diff" => cmd_diff(&rest),
         "-h" | "--help" | "help" => {
-            print!("{USAGE}");
+            out!("{USAGE}");
             ExitCode::SUCCESS
         }
         other => {
@@ -98,7 +128,7 @@ fn report(path: &str, p: &Parsed) {
 
     let etype = elf::et_name(s.e_type).unwrap_or("ET_?");
     let machine = elf::em_name(s.machine).unwrap_or("EM_?");
-    println!("{path}  {etype} {machine}  entry {:#x}", s.entry);
+    outln!("{path}  {etype} {machine}  entry {:#x}", s.entry);
 
     let mut line2 = Vec::new();
     if let Some(i) = &s.interp {
@@ -117,7 +147,7 @@ fn report(path: &str, p: &Parsed) {
         line2.push("static".to_owned());
     }
     if !line2.is_empty() {
-        println!("  {}", line2.join("   "));
+        outln!("  {}", line2.join("   "));
     }
 
     let pct = |n: u64| -> f64 {
@@ -128,21 +158,21 @@ fn report(path: &str, p: &Parsed) {
         }
     };
 
-    println!();
-    println!("  coverage      ok — every byte claimed exactly once");
-    println!("  size          {} bytes", commas(stats.total_bytes));
-    println!(
+    outln!("");
+    outln!("  coverage      ok — every byte claimed exactly once");
+    outln!("  size          {} bytes", commas(stats.total_bytes));
+    outln!(
         "  claims        {} ({} leaves, depth {})",
         commas(stats.claim_count as u64),
         commas(stats.leaf_count as u64),
         stats.max_depth
     );
-    println!(
+    outln!(
         "  explained     {:>12}  {:5.1}%",
         commas(stats.explained_bytes),
         pct(stats.explained_bytes)
     );
-    println!(
+    outln!(
         "  unexplained   {:>12}  {:5.1}%",
         commas(stats.filler_bytes),
         pct(stats.filler_bytes)
@@ -164,15 +194,15 @@ fn report(path: &str, p: &Parsed) {
     holes.sort_by_key(|(s, _)| std::cmp::Reverse(s.len));
 
     if !holes.is_empty() {
-        println!("\n  largest unexplained regions");
+        outln!("\n  largest unexplained regions");
         for (span, ctx) in holes.iter().take(8) {
-            println!("    {:#010x}  {:>10}  {ctx}", span.start, commas(span.len));
+            outln!("    {:#010x}  {:>10}  {ctx}", span.start, commas(span.len));
         }
         if holes.len() > 8 {
-            println!("    … and {} more", holes.len().saturating_sub(8));
+            outln!("    … and {} more", holes.len().saturating_sub(8));
         }
     }
-    println!();
+    outln!("");
 }
 
 /// Where a hole sits, named by its neighbours.
@@ -273,7 +303,7 @@ fn print_tree(cov: &Coverage, id: ClaimId, level: usize, max: usize) {
         (_, Some(n)) => n.to_string(),
         _ => String::new(),
     };
-    println!(
+    outln!(
         "{:#010x} {:>9}  {indent}{:<16} {detail}",
         c.span.start,
         commas(c.span.len),
@@ -282,7 +312,7 @@ fn print_tree(cov: &Coverage, id: ClaimId, level: usize, max: usize) {
     if level >= max {
         let kids = cov.children(id).len();
         if kids > 0 {
-            println!("{:>21}  {indent}  … {kids} children", "");
+            outln!("{:>21}  {indent}  … {kids} children", "");
         }
         return;
     }
@@ -310,16 +340,16 @@ fn cmd_at(args: &[&str]) -> ExitCode {
 
     let stack = p.coverage.claims_at(elfa_parse::FileId::PRIMARY, off);
     if stack.is_empty() {
-        println!("{off:#x} is past the end of the file");
+        outln!("{off:#x} is past the end of the file");
         return ExitCode::SUCCESS;
     }
-    println!("byte {off:#x}, innermost first:\n");
+    outln!("byte {off:#x}, innermost first:\n");
     for (level, id) in stack.iter().enumerate() {
         let Some(c) = p.coverage.claim(*id) else {
             continue;
         };
         let note = c.note.as_deref().unwrap_or("");
-        println!(
+        outln!(
             "{}{:<16} {:#010x}..{:#010x}  {note}",
             "  ".repeat(level),
             c.kind.field_name().unwrap_or_else(|| c.kind.label()),
@@ -341,14 +371,14 @@ fn cmd_map(args: &[&str]) -> ExitCode {
     let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
     let total = p.coverage.stats().total_bytes;
 
-    println!("{path}  {} mappings\n", image.mappings().len());
-    println!("  {:<20} {:>12}  {:<5} source", "vaddr", "size", "prot");
+    outln!("{path}  {} mappings\n", image.mappings().len());
+    outln!("  {:<20} {:>12}  {:<5} source", "vaddr", "size", "prot");
     for m in image.mappings() {
         let source = match m.source {
             MapSource::FromFile(s) => format!("file {:#x}..{:#x}", s.start, s.end()),
             MapSource::ZeroFill => "zero-fill — in no file".to_owned(),
         };
-        println!(
+        outln!(
             "  {:<20} {:>12}  {:<5} {source}",
             format!("{:#010x}", m.vaddr),
             commas(m.len),
@@ -356,9 +386,9 @@ fn cmd_map(args: &[&str]) -> ExitCode {
         );
     }
 
-    println!("\n  kernel mappings — page-rounded, as /proc/<pid>/maps would show");
+    outln!("\n  kernel mappings — page-rounded, as /proc/<pid>/maps would show");
     for v in image.vmas() {
-        println!(
+        outln!(
             "    {:#010x}-{:#010x}  {}  {:>10} bytes",
             v.start,
             v.end,
@@ -377,28 +407,28 @@ fn cmd_map(args: &[&str]) -> ExitCode {
             n as f64 * 100.0 / total as f64
         }
     };
-    println!();
-    println!(
+    outln!("");
+    outln!(
         "  in the process    {:>12}  {:5.1}%   including whatever shares a mapped page",
         commas(resident),
         pct(resident)
     );
-    println!(
+    outln!(
         "  never loaded      {:>12}  {:5.1}%   section headers, symbols, debug info",
         commas(never),
         pct(never)
     );
-    println!(
+    outln!(
         "  zero-filled       {:>12}          .bss — memory with no file behind it",
         commas(image.zero_filled_bytes())
     );
     if double > 0 {
-        println!(
+        outln!(
             "  mapped twice      {:>12}          file pages shared by two segments",
             commas(double)
         );
     }
-    println!();
+    outln!("");
     ExitCode::SUCCESS
 }
 
@@ -489,7 +519,7 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
         return match out_dir {
             Some(dir) => write_file(std::path::Path::new(dir), &svg),
             None => {
-                print!("{svg}");
+                out!("{svg}");
                 ExitCode::SUCCESS
             }
         };
@@ -500,7 +530,7 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
         return match out_dir {
             Some(dir) => write_file(std::path::Path::new(dir), &svg),
             None => {
-                print!("{svg}");
+                out!("{svg}");
                 ExitCode::SUCCESS
             }
         };
@@ -520,7 +550,7 @@ fn cmd_morph(args: &[&str]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    println!("{frames} frames in {dir}/");
+    outln!("{frames} frames in {dir}/");
     ExitCode::SUCCESS
 }
 
@@ -559,7 +589,7 @@ fn cmd_steps(args: &[&str]) -> ExitCode {
     let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
     let timeline = Timeline::plan(&p.summary, &image);
 
-    println!("{path}  {} steps modelled\n", timeline.len());
+    outln!("{path}  {} steps modelled\n", timeline.len());
 
     let mut last_phase = None;
     let mut shown = 0usize;
@@ -568,24 +598,24 @@ fn cmd_steps(args: &[&str]) -> ExitCode {
             continue;
         }
         if shown >= limit {
-            println!("    … {} more steps", timeline.len().saturating_sub(shown));
+            outln!("    … {} more steps", timeline.len().saturating_sub(shown));
             break;
         }
         if last_phase != Some(step.phase) {
-            println!("  {} · {}", step.phase.as_str(), step.actor.as_str());
+            outln!("  {} · {}", step.phase.as_str(), step.actor.as_str());
             last_phase = Some(step.phase);
         }
-        println!("    {:>4}  {}", step.n, step.narration);
+        outln!("    {:>4}  {}", step.n, step.narration);
         shown = shown.saturating_add(1);
     }
 
     let end = timeline.state_at(timeline.len());
-    println!(
+    outln!(
         "\n  at the end: {} mappings, {} addresses written before the program ran",
         end.mappings.len(),
         end.poked.len()
     );
-    println!();
+    outln!("");
     ExitCode::SUCCESS
 }
 
@@ -649,17 +679,17 @@ fn cmd_diff(args: &[&str]) -> ExitCode {
     };
 
     let checks = compare(path, &p, &modelled, &observed);
-    println!("\n{path}  model vs observed\n");
+    outln!("\n{path}  model vs observed\n");
     let mut diverged = 0usize;
     for c in &checks {
-        println!("  {}  {:<22} {}", c.verdict.mark(), c.name, c.detail);
+        outln!("  {}  {:<22} {}", c.verdict.mark(), c.name, c.detail);
         if matches!(c.verdict, Verdict::Differ) {
             diverged = diverged.saturating_add(1);
         }
     }
-    println!();
+    outln!("");
     if diverged > 0 {
-        println!(
+        outln!(
             "  {diverged} divergence{}. A divergence is a fact about loading until it is\n  explained; see docs/CONFORMANCE.md.\n",
             if diverged == 1 { "" } else { "s" }
         );
@@ -985,7 +1015,7 @@ fn cmd_trace(args: &[&str]) -> ExitCode {
         return match out {
             Some(f) => write_file(std::path::Path::new(f), &json),
             None => {
-                print!("{json}");
+                out!("{json}");
                 ExitCode::SUCCESS
             }
         };
@@ -998,43 +1028,43 @@ fn cmd_trace(args: &[&str]) -> ExitCode {
 fn report_trace(trace: &elfa_trace::Trace) {
     use elfa_trace::StepKind;
 
-    println!("{}  {} steps observed\n", trace.target, trace.steps.len());
+    outln!("{}  {} steps observed\n", trace.target, trace.steps.len());
 
-    println!("  objects, in the order the loader met them");
+    outln!("  objects, in the order the loader met them");
     for o in trace.objects() {
-        println!("    {o}");
+        outln!("    {o}");
     }
 
     let reloc = trace.relocation_order();
     if !reloc.is_empty() {
-        println!("\n  relocation order — dependencies first, the loader itself last");
+        outln!("\n  relocation order — dependencies first, the loader itself last");
         for o in &reloc {
-            println!("    {o}");
+            outln!("    {o}");
         }
     }
 
     let init = trace.init_order();
     if !init.is_empty() {
-        println!("\n  initialiser order — program last");
+        outln!("\n  initialiser order — program last");
         for o in &init {
-            println!("    {o}");
+            outln!("    {o}");
         }
     }
 
     for step in &trace.steps {
         if let StepKind::Search { library, tried } = &step.kind {
-            println!("\n  search for {library}");
+            outln!("\n  search for {library}");
             for path in tried {
-                println!("    {path}");
+                outln!("    {path}");
             }
         }
     }
 
-    println!(
+    outln!(
         "\n  {} symbols bound before the program ran",
         trace.bind_count()
     );
-    println!(
+    outln!(
         "  mappings: {} at the interpreter's first instruction, {} at the program's entry",
         trace.maps_at_interp.len(),
         trace.maps_at_entry.len()
@@ -1045,9 +1075,9 @@ fn report_trace(trace: &elfa_trace::Trace) {
         .len()
         .saturating_sub(trace.maps_at_interp.len());
     if grew > 0 {
-        println!("  the dynamic linker added {grew} mappings");
+        outln!("  the dynamic linker added {grew} mappings");
     }
-    println!();
+    outln!("");
 }
 
 fn write_file(path: &std::path::Path, contents: &str) -> ExitCode {
