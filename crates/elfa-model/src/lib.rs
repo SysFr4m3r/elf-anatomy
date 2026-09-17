@@ -806,27 +806,45 @@ impl Timeline {
         }
 
         // --- RELRO ---
+        //
+        // Both ends round *down*, which is what glibc's _dl_protect_relro does:
+        //
+        //     start = ALIGN_DOWN(l_addr + l_relro_addr, pagesize);
+        //     end   = ALIGN_DOWN(l_addr + l_relro_addr + l_relro_size, pagesize);
+        //
+        // Rounding the end up would be the flattering answer rather than the true one: a
+        // RELRO region that stops mid-page leaves that page writable, and a tool that
+        // reports it as sealed is worse than one that says nothing.
         if let Some(relro) = summary.segments.iter().find(|s| s.p_type == PT_GNU_RELRO) {
             let start = page_down(relro.vaddr);
-            let end = page_up(relro.vaddr.saturating_add(relro.memsz));
-            push(
-                Phase::Protect,
-                Actor::Interp,
-                format!(
-                    "mprotect {:#x}..{:#x} read-only — PT_GNU_RELRO: the GOT is sealed now that relocation is done",
-                    start, end
-                ),
-                Vec::new(),
-                alloc::vec![Effect::Protect {
-                    start,
-                    len: end.saturating_sub(start),
-                    to: Prot {
-                        read: true,
-                        write: false,
-                        exec: false,
-                    },
-                }],
-            );
+            let end = page_down(relro.vaddr.saturating_add(relro.memsz));
+            let partial = relro.vaddr.saturating_add(relro.memsz) > end;
+            if end > start {
+                push(
+                    Phase::Protect,
+                    Actor::Interp,
+                    format!(
+                        "mprotect {:#x}..{:#x} read-only — PT_GNU_RELRO: the GOT is sealed now that relocation is done{}",
+                        start,
+                        end,
+                        if partial {
+                            ", and the partial page above it stays writable"
+                        } else {
+                            ""
+                        }
+                    ),
+                    Vec::new(),
+                    alloc::vec![Effect::Protect {
+                        start,
+                        len: end.saturating_sub(start),
+                        to: Prot {
+                            read: true,
+                            write: false,
+                            exec: false,
+                        },
+                    }],
+                );
+            }
         }
 
         // --- initialisers ---
@@ -1015,6 +1033,31 @@ mod timeline_tests {
             !tl.steps()
                 .iter()
                 .any(|s| s.narration.contains("_dl_runtime_resolve"))
+        );
+    }
+
+    #[test]
+    fn a_relro_range_that_stops_mid_page_leaves_that_page_writable() {
+        // glibc rounds the RELRO end *down*. The fixtures on this host both happen to end
+        // on a page boundary, which hides the difference; this does not.
+        let mut s = summary(true);
+        s.segments = alloc::vec![
+            seg(PT_LOAD, 0x2db0, 0x3db0, 0x268, 0x690, PF_R | PF_W),
+            seg(PT_GNU_RELRO, 0x2db0, 0x3db0, 0x200, 0x200, PF_R),
+        ];
+        let image = MemImage::from_segments(&s.segments, 0x4000);
+        let tl = Timeline::plan(&s, &image);
+
+        // 0x3db0 + 0x200 = 0x3fb0, which rounds down to 0x3000 — equal to the start, so
+        // glibc protects nothing at all and the model must not pretend otherwise.
+        assert!(
+            !tl.steps().iter().any(|s| s.phase == Phase::Protect),
+            "an empty RELRO range must not produce a protect step"
+        );
+        let end = tl.state_at(tl.len().saturating_sub(1));
+        assert!(
+            end.prot_at(0x3db0).expect("mapped").write,
+            "nothing was sealed, so the GOT is still writable"
         );
     }
 

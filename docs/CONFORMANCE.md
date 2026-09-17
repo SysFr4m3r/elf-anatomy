@@ -123,3 +123,25 @@ For `hello-dyn` the model ends with 6 mappings and `/proc` shows 5. Neither is w
 are different views. Before the phase 4 diff can compare them it needs a
 `State::vmas()` — page-round each mapping, then merge adjacent runs with equal
 protection — and the comparison must be made on that, not on the raw list.
+
+## 6. RELRO rounds down at both ends
+
+`_dl_protect_relro` in glibc:
+
+```c
+start = ALIGN_DOWN (l->l_addr + l->l_relro_addr, pagesize);
+end   = ALIGN_DOWN (l->l_addr + l->l_relro_addr + l->l_relro_size, pagesize);
+```
+
+The **end rounds down**, not up. A RELRO region that stops mid-page leaves that page
+writable, and if the region is smaller than a page, `start == end` and nothing is protected
+at all.
+
+Every fixture on this host has a page-aligned RELRO end — `relr` is `0x3d98 + 0x268 =
+0x4000`, `hello-dyn` is `0x3db0 + 0x250 = 0x4000` — so rounding up and rounding down give
+the same answer and the difference is invisible. The model rounded up until this was
+checked against the glibc source.
+
+It matters because the error is in the flattering direction: a tool that reports the GOT as
+sealed when it is still writable is worse than one that says nothing. The unit test uses a
+synthetic segment with a mid-page end, since no fixture can exercise it.
