@@ -72,6 +72,30 @@ impl From<CoverageError> for ParseError {
     }
 }
 
+/// One program header, decoded.
+///
+/// The loader model needs these as values, not as claims: walking the claim tree to
+/// recover `p_vaddr` would mean parsing the parse output.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Segment {
+    pub p_type: u32,
+    pub flags: u32,
+    pub offset: u64,
+    pub vaddr: u64,
+    pub filesz: u64,
+    pub memsz: u64,
+    pub align: u64,
+}
+
+impl Segment {
+    /// Bytes the kernel zero-fills because they are in `p_memsz` but not `p_filesz`.
+    /// This is `.bss`, and it is the part of a process that exists in no file.
+    #[must_use]
+    pub const fn zero_fill(&self) -> u64 {
+        self.memsz.saturating_sub(self.filesz)
+    }
+}
+
 /// Header-level facts, pulled out so callers do not have to walk the claim tree to print
 /// a one-line description of a file.
 #[derive(Clone, Debug, Default)]
@@ -87,6 +111,7 @@ pub struct Summary {
     pub bind_now: bool,
     pub has_relr: bool,
     pub has_dynamic: bool,
+    pub segments: Vec<Segment>,
 }
 
 #[derive(Clone, Debug)]
@@ -456,6 +481,16 @@ fn parse_phdrs(
                 note,
             )?;
         }
+
+        summary.segments.push(crate::parse::Segment {
+            p_type,
+            flags: r.u32_at(base.saturating_add(4)).unwrap_or(0),
+            offset: p_offset,
+            vaddr: r.u64_at(base.saturating_add(16)).unwrap_or(0),
+            filesz: p_filesz,
+            memsz: p_memsz,
+            align: r.u64_at(base.saturating_add(48)).unwrap_or(0),
+        });
 
         if p_type == 2 {
             summary.has_dynamic = true;

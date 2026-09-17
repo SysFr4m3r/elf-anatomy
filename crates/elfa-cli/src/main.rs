@@ -8,7 +8,9 @@
 
 use std::process::ExitCode;
 
+use elfa_model::{MapSource, MemImage};
 use elfa_parse::{ClaimId, ClaimKind, Coverage, Parsed, Span, Value, elf, parse};
+use elfa_render::{Frame, morph_svg};
 
 const USAGE: &str = "\
 elfa — look at what is actually in an ELF file
@@ -17,6 +19,8 @@ USAGE
   elfa verify <file>...          check that every byte is accounted for
   elfa dump <file> [--depth N]   print the claim tree (default depth 2, --all for everything)
   elfa at <file> <offset>        what covers this byte? (offset may be decimal or 0x hex)
+  elfa map <file>                what the kernel maps, and what it leaves behind
+  elfa morph <file> [-o DIR]     the file→memory morph as SVG frames (--frames N, --t X)
 ";
 
 fn main() -> ExitCode {
@@ -31,6 +35,8 @@ fn main() -> ExitCode {
         "verify" => cmd_verify(&rest),
         "dump" => cmd_dump(&rest),
         "at" => cmd_at(&rest),
+        "map" => cmd_map(&rest),
+        "morph" => cmd_morph(&rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -315,6 +321,158 @@ fn cmd_at(args: &[&str]) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+fn cmd_map(args: &[&str]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let Some(p) = load(path) else {
+        return ExitCode::FAILURE;
+    };
+    let image = MemImage::from_segments(&p.summary.segments);
+    let total = p.coverage.stats().total_bytes;
+
+    println!("{path}  {} mappings\n", image.mappings().len());
+    println!("  {:<20} {:>12}  {:<5} source", "vaddr", "size", "prot");
+    for m in image.mappings() {
+        let source = match m.source {
+            MapSource::FromFile(s) => format!("file {:#x}..{:#x}", s.start, s.end()),
+            MapSource::ZeroFill => "zero-fill — in no file".to_owned(),
+        };
+        println!(
+            "  {:<20} {:>12}  {:<5} {source}",
+            format!("{:#010x}", m.vaddr),
+            commas(m.len),
+            m.prot.as_str()
+        );
+    }
+
+    let mapped = image.mapped_bytes();
+    let never = total.saturating_sub(mapped);
+    let pct = |n: u64| -> f64 {
+        if total == 0 {
+            0.0
+        } else {
+            n as f64 * 100.0 / total as f64
+        }
+    };
+    println!();
+    println!(
+        "  loaded from file  {:>12}  {:5.1}%",
+        commas(mapped),
+        pct(mapped)
+    );
+    println!(
+        "  never loaded      {:>12}  {:5.1}%   section headers, symbols, debug info, padding",
+        commas(never),
+        pct(never)
+    );
+    println!(
+        "  zero-filled       {:>12}          .bss — memory with no file behind it",
+        commas(image.zero_filled_bytes())
+    );
+    println!();
+    ExitCode::SUCCESS
+}
+
+fn cmd_morph(args: &[&str]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let mut out_dir: Option<&str> = None;
+    let mut frames = 48usize;
+    let mut single: Option<f64> = None;
+
+    let mut i = 1;
+    while let Some(arg) = args.get(i) {
+        match *arg {
+            "-o" | "--out" => {
+                out_dir = args.get(i.saturating_add(1)).copied();
+                i = i.saturating_add(1);
+            }
+            "--frames" => {
+                frames = args
+                    .get(i.saturating_add(1))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(frames);
+                i = i.saturating_add(1);
+            }
+            "--t" => {
+                single = args.get(i.saturating_add(1)).and_then(|v| v.parse().ok());
+                i = i.saturating_add(1);
+            }
+            other => {
+                eprintln!("unknown flag `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+
+    let Some(p) = load(path) else {
+        return ExitCode::FAILURE;
+    };
+    let image = MemImage::from_segments(&p.summary.segments);
+    if image.is_empty() {
+        eprintln!("{path}: no PT_LOAD segments; nothing to map");
+        return ExitCode::FAILURE;
+    }
+
+    let s = &p.summary;
+    let subtitle = format!(
+        "{}  {}  entry {:#x}   {} bytes on disk",
+        elf::et_name(s.e_type).unwrap_or("ET_?"),
+        elf::em_name(s.machine).unwrap_or("EM_?"),
+        s.entry,
+        commas(p.coverage.stats().total_bytes)
+    );
+    let frame = Frame {
+        coverage: &p.coverage,
+        image: &image,
+        title: path,
+        subtitle: &subtitle,
+    };
+
+    if let Some(t) = single {
+        let svg = morph_svg(&frame, t);
+        return match out_dir {
+            Some(dir) => write_file(std::path::Path::new(dir), &svg),
+            None => {
+                print!("{svg}");
+                ExitCode::SUCCESS
+            }
+        };
+    }
+
+    let dir = out_dir.unwrap_or("frames");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("{dir}: {e}");
+        return ExitCode::FAILURE;
+    }
+    let last = frames.saturating_sub(1).max(1) as f64;
+    for n in 0..frames {
+        let t = n as f64 / last;
+        let svg = morph_svg(&frame, t);
+        let out = std::path::Path::new(dir).join(format!("frame_{n:03}.svg"));
+        if write_file(&out, &svg) == ExitCode::FAILURE {
+            return ExitCode::FAILURE;
+        }
+    }
+    println!("{frames} frames in {dir}/");
+    ExitCode::SUCCESS
+}
+
+fn write_file(path: &std::path::Path, contents: &str) -> ExitCode {
+    match std::fs::write(path, contents) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Thousands separators. Byte counts are the whole output of this tool; they should be

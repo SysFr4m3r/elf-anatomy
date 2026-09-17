@@ -1,20 +1,18 @@
 [package]
-name = "elfa-cli"
-description = "Command-line front end for elf-anatomy."
+name = "elfa-render"
+description = "Headless renderer: the file→memory morph as SVG."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "elfa"
-path = "src/main.rs"
-
 [dependencies]
-elfa-parse = { path = "../elfa-parse" }
+elfa-parse = { path = "../elfa-parse", default-features = false }
 elfa-model = { path = "../elfa-model" }
-elfa-render = { path = "../elfa-render" }
+
+[dev-dependencies]
+elfa-parse = { path = "../elfa-parse" }
 
 [lints]
 workspace = true

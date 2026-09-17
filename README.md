@@ -7,7 +7,7 @@ structure; the right-hand panel shows where that byte lands in memory, who rewri
 in what order. The loader simulation is checked against a real `ld.so`, so the animation is a
 measurement rather than an illustration.
 
-**Status: phase 1a.** The parser works and the CLI is usable; there are no pictures yet.
+**Status: phase 1b.** The parser works, and the file→memory morph renders as SVG frames.
 
 ## Use
 
@@ -34,6 +34,21 @@ cargo build --release
 `elfa dump <file>` prints the claim tree; `elfa at <file> <offset>` says what covers one
 byte. Try it on a hello-world and see how much of the file is page-alignment padding —
 [docs/FORMAT-NOTES.md](docs/FORMAT-NOTES.md) has the numbers.
+
+## The morph
+
+```sh
+elfa map fixtures/out/hello-dyn      # what the kernel maps, and what it leaves behind
+elfa morph fixtures/out/hello-dyn -o frames/
+```
+
+`morph` writes a frame sequence interpolating between two drawings of the same bytes: the
+file in file order, and the same file at the addresses the kernel maps it to. Bands that
+are mapped slide across; bands that are not — section headers, symbol tables, debug info,
+the padding between segments — stay put and fade, because nothing loads them. `.bss` grows
+from nothing on the memory side, since it is in `p_memsz` and in no file.
+
+For an unstripped hello-world, **84.1% of the file never becomes part of the process.**
 
 ## Build
 

@@ -1,0 +1,14 @@
+[package]
+name = "elfa-model"
+description = "What an ELF file becomes once the kernel has mapped it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+elfa-parse = { path = "../elfa-parse", default-features = false }
+
+[lints]
+workspace = true
