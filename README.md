@@ -116,6 +116,30 @@ them were wrong in the flattering direction. They are all written up in
 splitting rather than recolouring a mapping, three separate corrections to the VMA merge
 rule, and a `.bss` mapping the diff was silently dropping.
 
+## What a file cannot account for
+
+```console
+$ elfa suspect /usr/bin/arj
+/usr/bin/arj  402,859 bytes, 56.1% accounted for
+  suspect  data appended past the last structure
+           171131 bytes at 0x38930 that no header, section or segment describes,
+           beginning with an ARJ self-extracting stub (entropy 5.0)
+```
+
+A parser that accounts for every byte knows exactly which bytes it could not account for,
+and that set is where appended payloads, packers and patched-in data live. On top of it:
+entry points outside any executable mapping, `PT_LOAD` segments that overlap, `p_filesz`
+larger than `p_memsz`, offsets and addresses that are not page-congruent, writable and
+executable segments, and relocations targeting memory the loader will not make writable.
+
+Run across **828 binaries** in `/usr/bin` and `/usr/lib`, it reports **one** finding — the
+one above, which is real. `arj` genuinely carries a second ELF file for its
+self-extracting archives.
+
+It reports; it does not judge. A self-extracting installer and a packed sample look
+identical from here, and saying otherwise would be pretending to knowledge the structure
+does not carry.
+
 ## Use
 
 ```sh
@@ -133,6 +157,8 @@ cargo build --release
 | `elfa steps <file>` | the modelled load, step by step |
 | `elfa trace <file>` | run it and record what the real loader did |
 | `elfa diff <file>` | check the model against that recording |
+| `elfa process <file>` | the whole dependency closure, `--verify` against a real load |
+| `elfa suspect <file>` | what the file cannot account for |
 | `elfa play <file>` | one HTML file that scrubs through both animations |
 
 `scripts/render-gif.sh <file> morph|steps` turns the frames into the animations above, and

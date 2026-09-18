@@ -1,0 +1,15 @@
+[package]
+name = "elfa-audit"
+description = "What a binary cannot account for: unexplained bytes and structural contradictions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+elfa-parse = { path = "../elfa-parse", default-features = false }
+elfa-model = { path = "../elfa-model" }
+
+[lints]
+workspace = true

@@ -70,3 +70,26 @@ The corrected figures for `hello-dyn`:
 | mapped twice | 4,096 | one file page at two addresses |
 
 33.9% is a smaller number than 84.1% and a true one. See `docs/CONFORMANCE.md`.
+
+## One binary in 828 carries something it does not describe
+
+`elfa suspect` over everything in `/usr/bin` and `/usr/lib/x86_64-linux-gnu` — 828 files —
+reports exactly one finding, and it is real:
+
+```
+/usr/bin/arj  402,859 bytes, 56.1% accounted for
+  suspect  data appended past the last structure
+           171131 bytes at 0x38930 ... beginning with an ARJ self-extracting stub
+```
+
+`arj` carries a second complete ELF file after the end of its own last structure, for
+building self-extracting archives. Nothing in the headers mentions it; the loader never
+maps it; `readelf` prints nothing about it because there is nothing to print. It is only
+visible to something that expects to account for every byte and notices when it cannot.
+
+That ratio is the whole argument for the check. A detector that fires on ordinary software
+is noise, and 827 of 828 came back with nothing to report.
+
+It is also the clearest case of why the tool reports rather than judges: a
+self-extracting archive and a packed sample are the same structure. The difference is
+intent, and intent is not in the file.

@@ -15,6 +15,7 @@ path = "src/main.rs"
 elfa-parse = { path = "../elfa-parse" }
 elfa-model = { path = "../elfa-model" }
 elfa-load = { path = "../elfa-load" }
+elfa-audit = { path = "../elfa-audit" }
 elfa-render = { path = "../elfa-render" }
 elfa-trace = { path = "../elfa-trace" }
 

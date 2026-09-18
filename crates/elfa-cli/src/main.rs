@@ -56,6 +56,7 @@ USAGE
   elfa steps <file>              the modelled load, step by step (--limit N, --phase P)
   elfa diff <file>               check the model against what the real loader does
   elfa process <file>            the whole dependency closure (--verify against a real load)
+  elfa suspect <file>...         what the file cannot account for
   elfa play <file> [-o FILE]     one HTML file that scrubs through both animations
 ";
 
@@ -77,6 +78,7 @@ fn main() -> ExitCode {
         "steps" => cmd_steps(&rest),
         "diff" => cmd_diff(&rest),
         "process" => cmd_process(&rest),
+        "suspect" => cmd_suspect(&rest),
         "play" => cmd_play(&rest),
         "-h" | "--help" | "help" => {
             out!("{USAGE}");
@@ -649,6 +651,57 @@ impl Verdict {
             Self::Differ => "DIFF",
             Self::NotModelled => "--  ",
         }
+    }
+}
+
+fn cmd_suspect(args: &[&str]) -> ExitCode {
+    if args.is_empty() {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    }
+    let mut flagged = 0usize;
+    for path in args {
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("{path}: cannot read");
+            continue;
+        };
+        let parsed = match elfa_parse::parse(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                continue;
+            }
+        };
+        let image = MemImage::from_segments(
+            &parsed.summary.segments,
+            parsed.coverage.stats().total_bytes,
+        );
+        let findings = elfa_audit::audit(&parsed, &image, &bytes);
+        let explained = elfa_audit::explained_fraction(&parsed) * 100.0;
+
+        outln!(
+            "{path}  {} bytes, {explained:.1}% accounted for",
+            commas(bytes.len() as u64)
+        );
+        if findings.is_empty() {
+            outln!("  nothing to report\n");
+            continue;
+        }
+        for f in &findings {
+            if f.severity == elfa_audit::Severity::Suspicious {
+                flagged = flagged.saturating_add(1);
+            }
+            outln!("  {:<8} {}", f.severity.as_str(), f.title);
+            outln!("           {}", f.detail);
+        }
+        outln!();
+    }
+    // Findings are not verdicts, so the exit code reports whether anything was flagged
+    // rather than whether anything is wrong.
+    if flagged > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
