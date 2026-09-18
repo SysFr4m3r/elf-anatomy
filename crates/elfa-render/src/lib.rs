@@ -276,10 +276,16 @@ pub fn morph_svg(frame: &Frame<'_>, t: f64) -> String {
             }
         };
 
+        // Each band carries the span it draws, so the page can turn a pointer position
+        // back into a file offset without knowing any of the geometry above.
         s.push_str(&format!(
-            r#"<rect x="{x:.1}" y="{y:.1}" width="{COL_W}" height="{h:.1}" fill="{}" opacity="{opacity:.2}"/>
+            r#"<rect class="band" data-off="{off}" data-len="{len}" data-label="{label}" data-va="{va}" x="{x:.1}" y="{y:.1}" width="{COL_W}" height="{h:.1}" fill="{}" opacity="{opacity:.2}"/>
 "#,
-            run.class.color()
+            run.class.color(),
+            off = run.span.start,
+            len = run.span.len,
+            label = esc(&run.label),
+            va = mapped.map_or_else(String::new, |v| v.to_string()),
         ));
 
         let ly = y + h.min(14.0) - 2.0;
@@ -322,7 +328,7 @@ pub fn morph_svg(frame: &Frame<'_>, t: f64) -> String {
             if poke.addr < lo || poke.addr >= hi {
                 continue;
             }
-            let _ = write_poke(&mut s, X_MEM, mem_y(poke.addr) - 1.0);
+            let _ = write_poke(&mut s, X_MEM, mem_y(poke.addr) - 1.0, poke.addr);
         }
     }
 
@@ -406,10 +412,10 @@ fn write_prot(s: &mut String, x: f64, y: f64, h: f64, colour: &str) -> core::fmt
     )
 }
 
-fn write_poke(s: &mut String, x: f64, y: f64) -> core::fmt::Result {
+fn write_poke(s: &mut String, x: f64, y: f64, addr: u64) -> core::fmt::Result {
     writeln!(
         s,
-        "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"52\" height=\"2\" fill=\"#ffd166\" opacity=\"0.95\"/>"
+        "<rect class=\"poke\" data-addr=\"{addr}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"52\" height=\"2\" fill=\"#ffd166\" opacity=\"0.95\"/>"
     )
 }
 

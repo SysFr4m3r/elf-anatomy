@@ -46,10 +46,19 @@ $ elfa steps fixtures/out/relr
 It is parsed in the tab — no upload, no server, no build step. Both animations are
 scrubbable, frame by frame.
 
+Hover any band and it tells you what that byte is — `0x0 · ehdr › e_ident › ei_mag`,
+`0x2e38 · dynamic › dynamic.entry · DT_GNU_HASH` — where it lands in memory, and **which
+steps of the load touch it**. Click a step number and the viewer jumps to that moment and
+outlines the bytes it read. Click a band to pin it; the selection survives scrubbing.
+
+That is the query the data model exists for: `claims_at(offset)` answers in log time, and
+every step already records the file spans it consulted, so "which steps care about this
+byte" and "which bytes caused this step" are the same relationship read in either
+direction.
+
 The parser, the memory model, the timeline and the renderer are the same code the CLI
-runs, compiled to `wasm32-unknown-unknown`; the browser layer is 150 lines that hold a
-parsed file between calls. A 2 MB `libc.so.6` parses once and then scrubs at about 3 ms a
-frame, because the expensive step happens on drop and never again.
+runs, compiled to `wasm32-unknown-unknown`. A 2 MB `libc.so.6` parses once and then scrubs
+at about 3 ms a frame, because the expensive step happens on drop and never again.
 
 ## Is any of that true?
 

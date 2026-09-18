@@ -13,6 +13,35 @@ export class Session {
         wasm.__wbg_session_free(ptr, 0);
     }
     /**
+     * What is at a file offset, and who touches it.
+     *
+     * This is the query the whole data model was built for: `claims_at` answers in
+     * log time, and every `Step` already records the file spans it reads, so "which
+     * steps of the load care about this byte" costs one pass over a few dozen steps.
+     *
+     * Returns JSON: the claim path innermost-first, the innermost claim's value, the
+     * virtual address if the byte is loaded, and the steps that read or write it.
+     *
+     * The offset arrives as `f64` rather than `u64` on purpose: wasm-bindgen maps a
+     * Rust `u64` to a JavaScript BigInt, so an ordinary Number throws at the boundary.
+     * `f64` is exact to 2^53, which is every ELF file that will ever be dropped into a
+     * tab.
+     * @param {number} offset
+     * @returns {string}
+     */
+    inspect(offset) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.session_inspect(this.__wbg_ptr, offset);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * @returns {number}
      */
     morphFrames() {
@@ -77,6 +106,43 @@ export class Session {
     stepCount() {
         const ret = wasm.session_stepCount(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * The narration for one step.
+     * @param {number} n
+     * @returns {string}
+     */
+    stepNarration(n) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.session_stepNarration(this.__wbg_ptr, n);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * The file spans one step of the load reads, as JSON.
+     *
+     * Selecting a step and seeing which bytes caused it is the same relationship as
+     * selecting a byte and seeing which steps touch it, read the other way.
+     * @param {number} n
+     * @returns {string}
+     */
+    stepSpans(n) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.session_stepSpans(this.__wbg_ptr, n);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * One-line description of what was parsed, for the header.

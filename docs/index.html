@@ -33,6 +33,16 @@
   .pos { color: #6b7482; min-width: 86px; text-align: right; }
   .hint { color: #6b7482; margin: 8px 0 0; font-size: 12px; flex: none; }
   .err { color: #ef6ea8; }
+  .info { flex: none; display: flex; align-items: baseline; gap: 10px; min-height: 22px;
+          margin-top: 8px; font-size: 12px; color: #8892a0; flex-wrap: wrap; }
+  .info .crumb { color: #d7dde5; }
+  .info .crumb b { color: #4c8dff; font-weight: 600; }
+  .info .va { color: #2fb8a8; }
+  .info .steps { display: flex; gap: 4px; align-items: center; }
+  .info .steps button { padding: 0 7px; height: 20px; font-size: 11px; border-radius: 4px; }
+  .stage svg .band { cursor: crosshair; }
+  .stage svg .band.sel { stroke: #ffffff; stroke-width: 2; }
+  .stage svg .band.reads { stroke: #ffd166; stroke-width: 2; }
   @media (max-height: 560px) { .hint { display: none; } }
 </style></head><body><main>
 
@@ -57,6 +67,8 @@
   </div>
 </div>
 
+<div class="info" id="info"><span class="crumb">hover the file column to inspect a byte</span></div>
+
 <div class="controls">
   <button data-act="home" title="First (Home)">|&lt;</button>
   <button data-act="prev" title="Back one (Left)">&lt;</button>
@@ -66,7 +78,7 @@
   <input type="range" id="range" min="0" max="0" value="0" disabled>
   <span class="pos" id="pos">–</span>
 </div>
-<p class="hint">Space plays and pauses · &larr; and &rarr; step one frame · Home and End jump to the ends · x86-64 ELF64 only.</p>
+<p class="hint">Hover a band to inspect a byte · click to pin it · the numbers are the steps that touch it · Space plays · &larr; &rarr; step · x86-64 ELF64 only.</p>
 
 </main>
 <script type="module">
@@ -78,6 +90,10 @@ const playBtn = document.querySelector('[data-act=play]');
 
 let session = null, track = 0, at = 0, timer = null;
 let cache = [[], []];
+// The pinned *byte*, not the pinned claim: a claim is usually far smaller than the band
+// drawn around it, so matching band.off against claim.off never matched anything.
+let pinned = null;   // {byte, steps} — survives frame changes
+const info = el('info');
 
 const count = () => track === 0 ? session.morphFrames() : session.stepCount();
 const render = n => track === 0 ? session.renderMorph(n) : session.renderStep(n);
@@ -92,7 +108,82 @@ function show(n) {
   range.value = n;
   range.max = max;
   pos.textContent = n + ' / ' + max;
+  decorate();
 }
+
+// Re-apply selection after the frame is swapped: innerHTML throws the old nodes away.
+function decorate() {
+  const bands = [...stage.querySelectorAll('.band')];
+  bands.forEach(b => b.classList.remove('sel', 'reads'));
+  if (pinned) {
+    bands.filter(b => pinned.byte >= +b.dataset.off
+                   && pinned.byte < +b.dataset.off + +b.dataset.len)
+         .forEach(b => b.classList.add('sel'));
+  }
+  // On the load track, outline whatever bytes the current step consulted.
+  if (track === 1 && session) {
+    const spans = JSON.parse(session.stepSpans(at));
+    if (spans.length) {
+      bands.forEach(b => {
+        const o = +b.dataset.off, l = +b.dataset.len;
+        if (spans.some(s => o < s.off + s.len && s.off < o + l)) b.classList.add('reads');
+      });
+    }
+  }
+}
+
+function offsetUnder(band, clientY) {
+  const r = band.getBoundingClientRect();
+  const frac = r.height > 0 ? (clientY - r.top) / r.height : 0;
+  const off = +band.dataset.off, len = +band.dataset.len;
+  return off + Math.min(len - 1, Math.max(0, Math.floor(frac * len)));
+}
+
+function render_info(d, band) {
+  const path = d.path.map((p, i) =>
+    i === d.path.length - 1 ? '<b>' + p + '</b>' : p).join(' › ');
+  const va = d.va === null
+    ? '<span class="va">never loaded</span>'
+    : '<span class="va">→ ' + '0x' + d.va.toString(16) + '</span>';
+  const steps = d.steps.length
+    ? '<span class="steps">touched by ' +
+      d.steps.map(n => '<button data-step="' + n + '">' + n + '</button>').join('') +
+      '</span>'
+    : '';
+  info.innerHTML =
+    '<span class="crumb">0x' + d.off.toString(16) + ' · ' + path + '</span>' +
+    (d.detail ? '<span>' + d.detail.replace(/[<>&]/g, c =>
+        ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</span>' : '') +
+    va + steps;
+  info.querySelectorAll('[data-step]').forEach(b =>
+    b.addEventListener('click', () => {
+      const n = +b.dataset.step;
+      stop();
+      if (track !== 1) { document.querySelectorAll('[role=tab]')[1].click(); }
+      show(n);
+    }));
+}
+
+stage.addEventListener('mousemove', e => {
+  if (!session || pinned) return;
+  const band = e.target.closest?.('.band');
+  if (!band) return;
+  render_info(JSON.parse(session.inspect(offsetUnder(band, e.clientY))), band);
+});
+
+stage.addEventListener('click', e => {
+  if (!session) return;
+  const band = e.target.closest?.('.band');
+  if (!band) { pinned = null; decorate(); return; }
+  const off = offsetUnder(band, e.clientY);
+  const d = JSON.parse(session.inspect(off));
+  const sameBand = pinned
+    && pinned.byte >= +band.dataset.off
+    && pinned.byte < +band.dataset.off + +band.dataset.len;
+  pinned = sameBand ? null : {byte: off, steps: d.steps};
+  render_info(d, band);
+  decorate();
+});
 
 function stop() { clearInterval(timer); timer = null; playBtn.innerHTML = '&#9654;'; }
 function start() {
