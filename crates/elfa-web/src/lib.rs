@@ -212,7 +212,10 @@ impl Session {
             r#"{{"off":{},"len":{},"path":[{}],"detail":{},"va":{},"steps":[{}]}}"#,
             span.0,
             span.1,
-            path.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","),
+            path.iter()
+                .map(|p| json_str(p))
+                .collect::<Vec<_>>()
+                .join(","),
             json_str(&detail),
             vaddr.map_or_else(|| "null".to_owned(), |v| v.to_string()),
             steps.join(",")
