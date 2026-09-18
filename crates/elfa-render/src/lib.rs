@@ -412,3 +412,191 @@ fn write_poke(s: &mut String, x: f64, y: f64) -> core::fmt::Result {
         "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"52\" height=\"2\" fill=\"#ffd166\" opacity=\"0.95\"/>"
     )
 }
+
+// ---------------------------------------------------------------------------
+// The player
+// ---------------------------------------------------------------------------
+
+/// One scrubbable sequence: the frames, and a caption per frame.
+pub struct Track {
+    pub name: String,
+    pub frames: Vec<String>,
+    pub captions: Vec<String>,
+}
+
+impl core::fmt::Debug for Track {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Track")
+            .field("name", &self.name)
+            .field("frames", &self.frames.len())
+            .finish()
+    }
+}
+
+/// A self-contained HTML page that plays the frames like a video, with a scrubber.
+///
+/// Every frame is inlined as its own `<svg>` and shown or hidden with a class. That costs
+/// more bytes than storing the markup in a JavaScript array and re-parsing on each change,
+/// and it buys two things worth more: scrubbing never re-parses anything, so dragging the
+/// slider is instant, and there is no string escaping to get wrong between the SVG
+/// generator and the page.
+///
+/// No scripts from anywhere, no fonts from anywhere, no network at all. The page is one
+/// file — mail it, open it from disk, or serve it from Pages.
+#[must_use]
+pub fn player_html(title: &str, tracks: &[Track]) -> String {
+    let mut s = String::with_capacity(512 * 1024);
+
+    s.push_str(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>"#,
+    );
+    s.push_str(&esc(title));
+    s.push_str(
+        r#"</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0f1115; color: #d7dde5;
+         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { max-width: 1240px; margin: 0 auto; padding: 16px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tabs button { background: #191d24; color: #8892a0; border: 1px solid #262c36;
+                 border-radius: 6px; padding: 6px 14px; cursor: pointer; font: inherit; }
+  .tabs button[aria-selected="true"] { background: #232a34; color: #d7dde5; }
+  .stage { position: relative; background: #0f1115; border: 1px solid #1c2129;
+           border-radius: 8px; overflow: hidden; }
+  .frame { display: none; }
+  .frame.on { display: block; }
+  .frame svg { display: block; width: 100%; height: auto; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .controls button { background: #191d24; color: #d7dde5; border: 1px solid #262c36;
+                     border-radius: 6px; width: 40px; height: 34px; cursor: pointer;
+                     font: inherit; }
+  .controls button:hover { background: #232a34; }
+  input[type=range] { flex: 1; accent-color: #4c8dff; }
+  .pos { color: #6b7482; min-width: 86px; text-align: right; }
+  .hint { color: #6b7482; margin-top: 10px; font-size: 12px; }
+  .track { display: none; }
+  .track.on { display: block; }
+</style></head><body><main>
+"#,
+    );
+
+    s.push_str("<div class=\"tabs\" role=\"tablist\">");
+    for (i, track) in tracks.iter().enumerate() {
+        let _ = write!(
+            s,
+            r#"<button role="tab" data-track="{i}" aria-selected="{}">{}</button>"#,
+            i == 0,
+            esc(&track.name)
+        );
+    }
+    s.push_str("</div>\n");
+
+    for (i, track) in tracks.iter().enumerate() {
+        let _ = write!(
+            s,
+            r#"<section class="track{}" data-track="{i}"><div class="stage">"#,
+            if i == 0 { " on" } else { "" }
+        );
+        for (n, frame) in track.frames.iter().enumerate() {
+            let _ = write!(
+                s,
+                r#"<div class="frame{}">"#,
+                if n == 0 { " on" } else { "" }
+            );
+            // The frame is already an <svg> document; its XML declaration-free form drops
+            // straight into HTML.
+            s.push_str(frame);
+            s.push_str("</div>");
+        }
+        let last = track.frames.len().saturating_sub(1);
+        let _ = write!(
+            s,
+            r#"</div>
+<div class="controls">
+  <button data-act="home" title="First (Home)">|&lt;</button>
+  <button data-act="prev" title="Back one (Left)">&lt;</button>
+  <button data-act="play" title="Play / pause (Space)">&#9654;</button>
+  <button data-act="next" title="Forward one (Right)">&gt;</button>
+  <button data-act="end" title="Last (End)">&gt;|</button>
+  <input type="range" min="0" max="{last}" value="0">
+  <span class="pos">0 / {last}</span>
+</div></section>
+"#
+        );
+    }
+
+    s.push_str(
+        r#"<p class="hint">Space plays and pauses · &larr; and &rarr; step one frame · Home and End jump to the ends · drag the slider to scrub.</p>
+</main>
+<script>
+const tracks = [...document.querySelectorAll('section.track')].map(section => {
+  const frames = [...section.querySelectorAll('.frame')];
+  const range = section.querySelector('input[type=range]');
+  const pos = section.querySelector('.pos');
+  const play = section.querySelector('[data-act=play]');
+  const t = { section, frames, range, pos, play, at: 0, timer: null };
+
+  t.show = n => {
+    n = Math.max(0, Math.min(frames.length - 1, n));
+    frames[t.at].classList.remove('on');
+    frames[n].classList.add('on');
+    t.at = n;
+    range.value = n;
+    pos.textContent = n + ' / ' + (frames.length - 1);
+  };
+  t.stop = () => { clearInterval(t.timer); t.timer = null; play.innerHTML = '&#9654;'; };
+  t.start = () => {
+    if (t.at >= frames.length - 1) t.show(0);
+    play.innerHTML = '&#10073;&#10073;';
+    t.timer = setInterval(() => {
+      if (t.at >= frames.length - 1) { t.stop(); return; }
+      t.show(t.at + 1);
+    }, 90);
+  };
+  t.toggle = () => (t.timer ? t.stop() : t.start());
+
+  range.addEventListener('input', () => { t.stop(); t.show(+range.value); });
+  section.querySelectorAll('[data-act]').forEach(b =>
+    b.addEventListener('click', () => {
+      const act = b.dataset.act;
+      if (act === 'play') return t.toggle();
+      t.stop();
+      if (act === 'home') t.show(0);
+      if (act === 'end') t.show(frames.length - 1);
+      if (act === 'prev') t.show(t.at - 1);
+      if (act === 'next') t.show(t.at + 1);
+    })
+  );
+  return t;
+});
+
+let current = 0;
+document.querySelectorAll('[role=tab]').forEach(tab =>
+  tab.addEventListener('click', () => {
+    tracks[current].stop();
+    document.querySelectorAll('[role=tab]').forEach(o =>
+      o.setAttribute('aria-selected', o === tab));
+    tracks.forEach((t, i) => t.section.classList.toggle('on', i === +tab.dataset.track));
+    current = +tab.dataset.track;
+  })
+);
+
+addEventListener('keydown', e => {
+  const t = tracks[current];
+  const keys = { ArrowLeft: -1, ArrowRight: 1 };
+  if (e.key in keys) { t.stop(); t.show(t.at + keys[e.key]); }
+  else if (e.key === ' ') t.toggle();
+  else if (e.key === 'Home') { t.stop(); t.show(0); }
+  else if (e.key === 'End') { t.stop(); t.show(t.frames.length - 1); }
+  else return;
+  e.preventDefault();
+});
+</script></body></html>
+"#,
+    );
+    s
+}

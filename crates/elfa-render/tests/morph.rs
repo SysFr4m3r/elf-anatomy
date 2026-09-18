@@ -135,3 +135,55 @@ fn a_step_frame_shows_only_what_has_been_mapped_so_far() {
     assert!(end.contains("#ffd166"), "poked addresses must be marked");
     assert!(end.contains(&format!("step {last} /")));
 }
+
+#[test]
+fn the_player_carries_every_frame_and_its_own_script() {
+    let Some(p) = parsed("hello-dyn") else {
+        eprintln!("no fixtures; run `make -C fixtures`");
+        return;
+    };
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
+    let frame = Frame {
+        coverage: &p.coverage,
+        image: &image,
+        title: "hello-dyn",
+        subtitle: "",
+        step: None,
+    };
+    let track = elfa_render::Track {
+        name: "file → memory".to_owned(),
+        frames: (0..5)
+            .map(|n| morph_svg(&frame, f64::from(n) / 4.0))
+            .collect(),
+        captions: Vec::new(),
+    };
+    let html = elfa_render::player_html("hello-dyn", &[track]);
+
+    assert_eq!(
+        html.matches("<svg").count(),
+        5,
+        "every frame must be inlined"
+    );
+    assert!(
+        html.contains(r#"max="4""#),
+        "the slider must span the frames"
+    );
+    // Self-contained: nothing is fetched, so the page works from disk or from a mail
+    // attachment, and a CSP that blocks third parties cannot break it. The only absolute
+    // URL allowed is the SVG namespace, which is an identifier and never resolved.
+    assert!(!html.contains("<script src"), "no external script");
+    assert!(!html.contains("<link"), "no external stylesheet");
+    assert!(!html.contains("src=\"http"), "no remote resource");
+    assert!(!html.contains("href=\"http"), "no remote resource");
+    for url in html.match_indices("http") {
+        let tail = html.get(url.0..url.0 + 40).unwrap_or_default();
+        assert!(
+            tail.starts_with("http://www.w3.org/2000/svg"),
+            "unexpected URL in a self-contained page: {tail}"
+        );
+    }
+    assert!(
+        html.contains("addEventListener('keydown'"),
+        "keyboard control"
+    );
+}

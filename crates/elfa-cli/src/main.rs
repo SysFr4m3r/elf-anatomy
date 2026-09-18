@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use elfa_model::{MapSource, MemImage, Prot, Timeline};
 use elfa_parse::{ClaimId, ClaimKind, Coverage, Parsed, Span, Value, elf, parse};
-use elfa_render::{Frame, StepView, morph_svg};
+use elfa_render::{Frame, StepView, Track, morph_svg, player_html};
 
 /// `println!` that exits quietly when the reader goes away.
 ///
@@ -55,6 +55,7 @@ USAGE
   elfa trace <file> [-o FILE]    run it and record what the real loader did (--json)
   elfa steps <file>              the modelled load, step by step (--limit N, --phase P)
   elfa diff <file>               check the model against what the real loader does
+  elfa play <file> [-o FILE]     one HTML file that scrubs through both animations
 ";
 
 fn main() -> ExitCode {
@@ -74,6 +75,7 @@ fn main() -> ExitCode {
         "trace" => cmd_trace(&rest),
         "steps" => cmd_steps(&rest),
         "diff" => cmd_diff(&rest),
+        "play" => cmd_play(&rest),
         "-h" | "--help" | "help" => {
             out!("{USAGE}");
             ExitCode::SUCCESS
@@ -645,6 +647,112 @@ impl Verdict {
             Self::Differ => "DIFF",
             Self::NotModelled => "--  ",
         }
+    }
+}
+
+fn cmd_play(args: &[&str]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let mut out = "player.html";
+    let mut frames = 36usize;
+    let mut i = 1;
+    while let Some(arg) = args.get(i) {
+        match *arg {
+            "-o" | "--out" => {
+                out = args.get(i.saturating_add(1)).copied().unwrap_or(out);
+                i = i.saturating_add(1);
+            }
+            "--frames" => {
+                frames = args
+                    .get(i.saturating_add(1))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(frames);
+                i = i.saturating_add(1);
+            }
+            other => {
+                eprintln!("unknown flag `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+
+    let Some(p) = load(path) else {
+        return ExitCode::FAILURE;
+    };
+    let image = MemImage::from_segments(&p.summary.segments, p.coverage.stats().total_bytes);
+    if image.is_empty() {
+        eprintln!("{path}: no PT_LOAD segments; nothing to map");
+        return ExitCode::FAILURE;
+    }
+    let timeline = Timeline::plan(&p.summary, &image);
+    let s = &p.summary;
+    let subtitle = format!(
+        "{}  {}  entry {:#x}   {} bytes on disk",
+        elf::et_name(s.e_type).unwrap_or("ET_?"),
+        elf::em_name(s.machine).unwrap_or("EM_?"),
+        s.entry,
+        commas(p.coverage.stats().total_bytes)
+    );
+
+    let base = Frame {
+        coverage: &p.coverage,
+        image: &image,
+        title: path,
+        subtitle: &subtitle,
+        step: None,
+    };
+
+    let last = frames.saturating_sub(1).max(1) as f64;
+    let morph = Track {
+        name: "file → memory".to_owned(),
+        frames: (0..frames)
+            .map(|n| morph_svg(&base, n as f64 / last))
+            .collect(),
+        captions: Vec::new(),
+    };
+
+    let total = timeline.len().saturating_sub(1);
+    let steps = Track {
+        name: format!("the load · {} steps", timeline.len()),
+        frames: (0..timeline.len())
+            .map(|n| {
+                let state = timeline.state_at(n);
+                let frame = Frame {
+                    step: Some(StepView {
+                        state: &state,
+                        narration: timeline.steps().get(n).map_or("", |s| s.narration.as_str()),
+                        n,
+                        total,
+                    }),
+                    ..base
+                };
+                morph_svg(&frame, 1.0)
+            })
+            .collect(),
+        captions: Vec::new(),
+    };
+
+    let html = player_html(path, &[morph, steps]);
+    let written = write_file(std::path::Path::new(out), &html);
+    if written == ExitCode::SUCCESS {
+        outln!(
+            "{out}  {}  ({} + {} frames)",
+            human(html.len() as u64),
+            frames,
+            timeline.len()
+        );
+    }
+    written
+}
+
+fn human(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", bytes / 1024)
     }
 }
 

@@ -82,8 +82,18 @@ cargo build --release
 | `elfa steps <file>` | the modelled load, step by step |
 | `elfa trace <file>` | run it and record what the real loader did |
 | `elfa diff <file>` | check the model against that recording |
+| `elfa play <file>` | one HTML file that scrubs through both animations |
 
 `scripts/render-gif.sh <file> morph|steps` turns the frames into the animations above.
+
+```sh
+elfa play /bin/ls -o player.html
+```
+
+`play` writes **one self-contained HTML file** that scrubs through both animations like a
+video: a slider, play/pause, single-step forward and back, and keyboard control. No
+scripts, fonts or images from anywhere — open it from disk, mail it, or serve it. For
+`hello-dyn` it is 439 KB, smaller than either GIF above and interactive.
 
 > **`elfa trace` and `elfa diff` execute the binary.** They are the only commands that do;
 > everything else just reads bytes. Do not point them at something you would not run.
