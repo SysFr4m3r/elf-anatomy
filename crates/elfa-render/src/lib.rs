@@ -458,28 +458,37 @@ pub fn player_html(title: &str, tracks: &[Track]) -> String {
         r#"</title>
 <style>
   :root { color-scheme: dark; }
+  html, body { height: 100%; }
   body { margin: 0; background: #0f1115; color: #d7dde5;
          font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  main { max-width: 1240px; margin: 0 auto; padding: 16px; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  /* The frame and its controls have to be on screen together: the caption names the step
+     the picture is showing, and scrolling between them makes you hold one in your head. */
+  main { max-width: 1240px; height: 100%; margin: 0 auto; padding: 10px 16px;
+         display: flex; flex-direction: column; box-sizing: border-box; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 8px; flex: none; }
   .tabs button { background: #191d24; color: #8892a0; border: 1px solid #262c36;
                  border-radius: 6px; padding: 6px 14px; cursor: pointer; font: inherit; }
   .tabs button[aria-selected="true"] { background: #232a34; color: #d7dde5; }
   .stage { position: relative; background: #0f1115; border: 1px solid #1c2129;
-           border-radius: 8px; overflow: hidden; }
-  .frame { display: none; }
-  .frame.on { display: block; }
-  .frame svg { display: block; width: 100%; height: auto; }
-  .controls { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+           border-radius: 8px; overflow: hidden; flex: 1 1 auto; min-height: 0;
+           display: flex; align-items: center; justify-content: center; }
+  .frame { display: none; width: 100%; height: 100%; }
+  .frame.on { display: flex; align-items: center; }
+  /* viewBox plus the default preserveAspectRatio letterboxes rather than distorting, so
+     the frame simply fits whatever space is left over. */
+  .frame svg { display: block; width: 100%; height: 100%; max-height: 100%; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px;
+              flex: none; }
   .controls button { background: #191d24; color: #d7dde5; border: 1px solid #262c36;
                      border-radius: 6px; width: 40px; height: 34px; cursor: pointer;
                      font: inherit; }
   .controls button:hover { background: #232a34; }
   input[type=range] { flex: 1; accent-color: #4c8dff; }
   .pos { color: #6b7482; min-width: 86px; text-align: right; }
-  .hint { color: #6b7482; margin-top: 10px; font-size: 12px; }
+  .hint { color: #6b7482; margin: 8px 0 0; font-size: 12px; flex: none; }
   .track { display: none; }
-  .track.on { display: block; }
+  .track.on { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  @media (max-height: 560px) { .hint { display: none; } }
 </style></head><body><main>
 "#,
     );
