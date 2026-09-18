@@ -64,26 +64,29 @@ at about 3 ms a frame, because the expensive step happens on drop and never agai
 
 ```console
 $ elfa process /bin/ls --verify
-/bin/ls  4 objects, 3,075,032 mapped, 1,861 startup relocations
+/bin/ls  4 objects, 3,075,032 mapped, 1,897 startup relocations
 
   #  object                                     mapped    relocs  needed by
   0  ls                                        164,448       409  —
   1  libselinux.so.1                           192,616       167  ls
   2  libc.so.6                               2,008,776     1,243  ls
-  3  libpcre2-8.so.0                           709,192        42  libselinux.so.1
+  3  libpcre2-8.so.0                           709,192        78  libselinux.so.1
 
-  the program is 22.0% of the relocations its own startup performs
+
+  the program is 21.6% of the relocations its own startup performs
 
   resolution, ours against the loader's
     ok    libselinux.so.1          /lib/x86_64-linux-gnu/libselinux.so.1
     ok    libc.so.6                /lib/x86_64-linux-gnu/libc.so.6
     ok    libpcre2-8.so.0          /lib/x86_64-linux-gnu/libpcre2-8.so.0
+
   relocation order      ok    3 dependency edge(s) respected
 ```
 
 `process` follows `DT_NEEDED` the way `ld.so` does — breadth-first, `LD_LIBRARY_PATH` then
 the default directories — and parses everything it finds. `libpcre2` is in there because
-`libselinux` needs it; nothing in `/bin/ls` mentions it.
+`libselinux` needs it; nothing in `/bin/ls` mentions it. The program is a fifth of the
+relocation work its own startup does.
 
 Resolution is a claim about behaviour like any other, so `--verify` checks it against the
 paths the real loader settled on.
