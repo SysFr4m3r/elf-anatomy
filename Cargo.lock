@@ -69,6 +69,7 @@ version = "0.0.0"
 name = "elfa-web"
 version = "0.0.0"
 dependencies = [
+ "elfa-audit",
  "elfa-model",
  "elfa-parse",
  "elfa-render",

@@ -26,6 +26,9 @@ const MORPH_FRAMES: usize = 36;
 #[wasm_bindgen]
 #[derive(Debug)]
 pub struct Session {
+    /// Retained for the audit, which needs the bytes to measure entropy. A file big
+    /// enough for this to matter is already held twice over by its own claim tree.
+    bytes: Vec<u8>,
     parsed: Parsed,
     image: MemImage,
     timeline: Timeline,
@@ -58,6 +61,7 @@ impl Session {
         );
 
         Ok(Session {
+            bytes: bytes.to_vec(),
             parsed,
             image,
             timeline,
@@ -130,6 +134,30 @@ impl Session {
     pub fn render_morph(&self, n: usize) -> String {
         let last = MORPH_FRAMES.saturating_sub(1).max(1) as f64;
         morph_svg(&self.base(), n as f64 / last)
+    }
+
+    /// Structural findings, worst first, as JSON.
+    ///
+    /// The same audit the CLI runs — the crate is `no_std` precisely so a tab can reach
+    /// the same conclusions about a file nobody else has seen.
+    #[must_use]
+    pub fn findings(&self) -> String {
+        let found = elfa_audit::audit(&self.parsed, &self.image, &self.bytes);
+        let body = found
+            .iter()
+            .map(|f| {
+                format!(
+                    r#"{{"sev":{},"title":{},"detail":{},"off":{},"len":{}}}"#,
+                    json_str(f.severity.as_str()),
+                    json_str(f.title),
+                    json_str(&f.detail),
+                    f.span.map_or(0, |s| s.start),
+                    f.span.map_or(0, |s| s.len),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{body}]")
     }
 
     /// What is at a file offset, and who touches it.

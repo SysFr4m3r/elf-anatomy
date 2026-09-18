@@ -13,6 +13,25 @@ export class Session {
         wasm.__wbg_session_free(ptr, 0);
     }
     /**
+     * Structural findings, worst first, as JSON.
+     *
+     * The same audit the CLI runs — the crate is `no_std` precisely so a tab can reach
+     * the same conclusions about a file nobody else has seen.
+     * @returns {string}
+     */
+    findings() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.session_findings(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * What is at a file offset, and who touches it.
      *
      * This is the query the whole data model was built for: `claims_at` answers in

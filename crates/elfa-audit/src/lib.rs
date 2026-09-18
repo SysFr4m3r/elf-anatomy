@@ -110,6 +110,23 @@ pub fn entropy(bytes: &[u8]) -> f64 {
         .sum()
 }
 
+/// Thousands separators, without `std`'s formatting machinery.
+///
+/// Byte counts are most of what a finding says. Printing one of them as `402,859` and the
+/// next as `171131` in the same sentence reads as two different tools talking.
+#[must_use]
+pub fn commas(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && digits.len().saturating_sub(i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Name what a run of bytes starts with, when it is something recognisable.
 ///
 /// Appended data is far more useful with its container named: `/usr/bin/arj` carries an
@@ -177,7 +194,8 @@ fn unexplained(parsed: &Parsed, bytes: &[u8], out: &mut Vec<Finding>) {
                 title: "data appended past the last structure",
                 detail: format!(
                     "{} bytes at {:#x} that no header, section or segment describes{what} (entropy {e:.1})",
-                    span.len, span.start
+                    commas(span.len),
+                    span.start
                 ),
                 span: Some(span),
             });
@@ -187,7 +205,8 @@ fn unexplained(parsed: &Parsed, bytes: &[u8], out: &mut Vec<Finding>) {
                 title: "high-entropy region belongs to nothing",
                 detail: format!(
                     "{} bytes at {:#x}, entropy {e:.1} — compressed, encrypted, or random",
-                    span.len, span.start
+                    commas(span.len),
+                    span.start
                 ),
                 span: Some(span),
             });
@@ -383,6 +402,15 @@ mod tests {
         let noise: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
         assert!(entropy(&noise) > 7.9, "{}", entropy(&noise));
         assert_eq!(entropy(&[]), 0.0);
+    }
+
+    #[test]
+    fn byte_counts_read_the_same_everywhere() {
+        assert_eq!(commas(0), "0");
+        assert_eq!(commas(999), "999");
+        assert_eq!(commas(1000), "1,000");
+        assert_eq!(commas(171_131), "171,131");
+        assert_eq!(commas(u64::MAX), "18,446,744,073,709,551,615");
     }
 
     #[test]

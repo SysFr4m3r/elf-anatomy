@@ -33,6 +33,18 @@
   .pos { color: #6b7482; min-width: 86px; text-align: right; }
   .hint { color: #6b7482; margin: 8px 0 0; font-size: 12px; flex: none; }
   .err { color: #ef6ea8; }
+  .findings { flex: none; display: flex; flex-direction: column; gap: 4px; margin: 6px 0 0; }
+  .finding { display: flex; gap: 8px; align-items: baseline; font-size: 12px;
+             background: #161a21; border: 1px solid #262c36; border-left-width: 3px;
+             border-radius: 5px; padding: 4px 9px; cursor: pointer; }
+  .finding:hover { background: #1c212a; }
+  .finding.suspect { border-left-color: #ef6ea8; }
+  .finding.odd { border-left-color: #e8c547; }
+  .finding.note { border-left-color: #4c8dff; }
+  .finding .sev { color: #8892a0; min-width: 52px; }
+  .finding .ttl { color: #d7dde5; white-space: nowrap; }
+  .finding .det { color: #6b7482; flex: 1 1 auto; min-width: 0;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .info { flex: none; display: flex; align-items: baseline; gap: 10px; min-height: 22px;
           margin-top: 8px; font-size: 12px; color: #8892a0; flex-wrap: wrap; }
   .info .crumb { color: #d7dde5; }
@@ -58,6 +70,8 @@
   <button role="tab" data-track="0" aria-selected="true">file → memory</button>
   <button role="tab" data-track="1" aria-selected="false">the load</button>
 </div>
+
+<div class="findings" id="findings"></div>
 
 <div class="stage" id="stage">
   <div class="drop" id="drop">
@@ -132,6 +146,34 @@ function decorate() {
   }
 }
 
+// Structural findings, if the file has any. Clicking one pins the bytes it is about, so
+// "171,131 bytes nothing describes" becomes a highlighted band rather than a number.
+function showFindings() {
+  const box = el('findings');
+  box.innerHTML = '';
+  if (!session) return;
+  for (const f of JSON.parse(session.findings())) {
+    const div = document.createElement('div');
+    div.className = 'finding ' + f.sev;
+    div.innerHTML = '<span class="sev">' + f.sev + '</span>' +
+                    '<span class="ttl"></span><span class="det"></span>';
+    div.querySelector('.ttl').textContent = f.title;
+    div.querySelector('.det').textContent = f.detail;
+    if (f.len > 0) {
+      div.addEventListener('click', () => {
+        stop();
+        if (track !== 0) document.querySelectorAll('[role=tab]')[0].click();
+        pinned = {byte: f.off, steps: []};
+        show(0);
+        render_info(JSON.parse(session.inspect(f.off)));
+      });
+    } else {
+      div.style.cursor = 'default';
+    }
+    box.appendChild(div);
+  }
+}
+
 function offsetUnder(band, clientY) {
   const r = band.getBoundingClientRect();
   const frac = r.height > 0 ? (clientY - r.top) / r.height : 0;
@@ -139,7 +181,7 @@ function offsetUnder(band, clientY) {
   return off + Math.min(len - 1, Math.max(0, Math.floor(frac * len)));
 }
 
-function render_info(d, band) {
+function render_info(d) {
   const path = d.path.map((p, i) =>
     i === d.path.length - 1 ? '<b>' + p + '</b>' : p).join(' › ');
   const va = d.va === null
@@ -168,7 +210,7 @@ stage.addEventListener('mousemove', e => {
   if (!session || pinned) return;
   const band = e.target.closest?.('.band');
   if (!band) return;
-  render_info(JSON.parse(session.inspect(offsetUnder(band, e.clientY))), band);
+  render_info(JSON.parse(session.inspect(offsetUnder(band, e.clientY))));
 });
 
 stage.addEventListener('click', e => {
@@ -181,7 +223,7 @@ stage.addEventListener('click', e => {
     && pinned.byte >= +band.dataset.off
     && pinned.byte < +band.dataset.off + +band.dataset.len;
   pinned = sameBand ? null : {byte: off, steps: d.steps};
-  render_info(d, band);
+  render_info(d);
   decorate();
 });
 
@@ -207,8 +249,10 @@ async function load(name, bytes) {
     return;
   }
   cache = [[], []];
+  pinned = null;
   range.disabled = false;
   sub.textContent = session.summary();
+  showFindings();
   document.title = name + ' — elf-anatomy';
   show(0);
 }

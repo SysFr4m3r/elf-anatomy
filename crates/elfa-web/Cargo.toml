@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 elfa-parse = { path = "../elfa-parse", default-features = false }
 elfa-model = { path = "../elfa-model" }
 elfa-render = { path = "../elfa-render" }
+elfa-audit = { path = "../elfa-audit" }
 wasm-bindgen = "=0.2.128"
 
 # Deliberately not `workspace = true`: the workspace forbids unsafe, and wasm-bindgen's

@@ -140,6 +140,10 @@ It reports; it does not judge. A self-extracting installer and a packed sample l
 identical from here, and saying otherwise would be pretending to knowledge the structure
 does not carry.
 
+The [viewer](https://sysfr4m3r.github.io/elf-anatomy/) runs the same audit on whatever you
+drop into it, and clicking a finding pins the bytes it is about — so "171,131 bytes nothing
+describes" becomes a highlighted band in the picture rather than a number.
+
 ## Use
 
 ```sh
