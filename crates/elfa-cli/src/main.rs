@@ -55,6 +55,7 @@ USAGE
   elfa trace <file> [-o FILE]    run it and record what the real loader did (--json)
   elfa steps <file>              the modelled load, step by step (--limit N, --phase P)
   elfa diff <file>               check the model against what the real loader does
+  elfa process <file>            the whole dependency closure (--verify against a real load)
   elfa play <file> [-o FILE]     one HTML file that scrubs through both animations
 ";
 
@@ -75,6 +76,7 @@ fn main() -> ExitCode {
         "trace" => cmd_trace(&rest),
         "steps" => cmd_steps(&rest),
         "diff" => cmd_diff(&rest),
+        "process" => cmd_process(&rest),
         "play" => cmd_play(&rest),
         "-h" | "--help" | "help" => {
             out!("{USAGE}");
@@ -648,6 +650,189 @@ impl Verdict {
             Self::NotModelled => "--  ",
         }
     }
+}
+
+fn cmd_process(args: &[&str]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let verify = args.contains(&"--verify");
+
+    let proc = match elfa_load::load(
+        std::path::Path::new(path),
+        &elfa_load::SearchPath::default(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mapped = proc.total_mapped();
+    let relocs = proc.total_relocations();
+    outln!(
+        "{path}  {} objects, {} mapped, {} startup relocations\n",
+        proc.objects.len(),
+        commas(mapped),
+        commas(relocs as u64)
+    );
+    outln!(
+        "  {:<2} {:<38} {:>10} {:>9}  {}",
+        "#",
+        "object",
+        "mapped",
+        "relocs",
+        "needed by"
+    );
+    for o in &proc.objects {
+        let by = o.needed_by.map_or_else(
+            || "—".to_owned(),
+            |n| {
+                proc.objects
+                    .get(n as usize)
+                    .map_or_else(|| n.to_string(), |p| short(&p.path))
+            },
+        );
+        outln!(
+            "  {:<2} {:<38} {:>10} {:>9}  {by}",
+            o.id,
+            short(&o.path),
+            commas(o.image.resident_bytes()),
+            commas(o.startup_relocations() as u64)
+        );
+    }
+
+    outln!("\n  relocation order — dependencies first");
+    for o in proc.relocation_order() {
+        outln!("    {}", short(&o.path));
+    }
+
+    // The number that justifies following the closure at all.
+    if let Some(program) = proc.program()
+        && relocs > 0
+    {
+        let share = program.startup_relocations() as f64 * 100.0 / relocs as f64;
+        outln!("\n  the program is {share:.1}% of the relocations its own startup performs");
+    }
+    outln!();
+
+    if !verify {
+        return ExitCode::SUCCESS;
+    }
+
+    // Resolution is a claim about behaviour, so check it against the loader's own answer.
+    if proc.objects.len() < 2 {
+        outln!("  nothing to verify: no dependencies\n");
+        return ExitCode::SUCCESS;
+    }
+    let Some(p) = load(path) else {
+        return ExitCode::FAILURE;
+    };
+    eprintln!("running {path} to observe its load…");
+    let observed = match elfa_trace::capture(
+        std::path::Path::new(path),
+        p.summary.entry,
+        p.summary.e_type == 3,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let aliases = observed.aliases();
+    let mut wrong = 0usize;
+    outln!("  resolution, ours against the loader's");
+    // Compare by canonical path. On a usrmerge system /lib is a symlink to /usr/lib, so a
+    // naive search and the loader's cache name the same inode by different paths, and a
+    // string comparison calls that a divergence four times over.
+    let canon = |s: &str| {
+        std::fs::canonicalize(s).map_or_else(|_| s.to_owned(), |p| p.display().to_string())
+    };
+    for o in proc.objects.iter().skip(1) {
+        let theirs = aliases.get(&o.requested);
+        let ours = o.path.display().to_string();
+        let verdict = match theirs {
+            Some(t) if canon(t) == canon(&ours) => "ok  ",
+            Some(_) => {
+                wrong = wrong.saturating_add(1);
+                "DIFF"
+            }
+            None => "--  ",
+        };
+        outln!(
+            "    {verdict}  {:<24} {ours}{}",
+            o.requested,
+            theirs.map_or_else(
+                || "   (the loader did not search for it)".to_owned(),
+                |t| if canon(t) == canon(&ours) {
+                    String::new()
+                } else {
+                    format!("\n              loader chose {t}")
+                }
+            )
+        );
+    }
+
+    // Order. The model claims dependencies are relocated before the objects that need
+    // them — a partial order, not a sequence. glibc also has a total order, produced by
+    // its own sort of the link map, and it breaks ties between unrelated objects
+    // differently: for /bin/ls it relocates libc before libpcre2, we discover libpcre2
+    // first. Both satisfy the claim. Asserting the sequence would be asserting glibc's
+    // tie-breaking, which is not modelled and not part of the claim.
+    let theirs: Vec<&str> = observed
+        .relocation_order()
+        .into_iter()
+        .filter(|o| !o.contains("ld-linux"))
+        .collect();
+    let rank = |needle: &std::path::Path| -> Option<usize> {
+        let base = needle.file_name()?.to_string_lossy().into_owned();
+        theirs.iter().position(|o| o.ends_with(&base))
+    };
+
+    let mut violations = Vec::new();
+    for o in &proc.objects {
+        let Some(parent) = o.needed_by.and_then(|n| proc.objects.get(n as usize)) else {
+            continue;
+        };
+        if let (Some(dep), Some(user)) = (rank(&o.path), rank(&parent.path))
+            && dep > user
+        {
+            violations.push(format!("{} after {}", short(&o.path), short(&parent.path)));
+        }
+    }
+
+    let edges = proc
+        .objects
+        .iter()
+        .filter(|o| o.needed_by.is_some())
+        .count();
+    outln!(
+        "\n  relocation order      {}",
+        if violations.is_empty() {
+            format!("ok    {edges} dependency edge(s) respected; order {theirs:?}")
+        } else {
+            wrong = wrong.saturating_add(1);
+            format!("DIFF  {violations:?}")
+        }
+    );
+
+    outln!();
+    if wrong > 0 {
+        outln!("  {wrong} divergence(s); see docs/CONFORMANCE.md\n");
+    }
+    ExitCode::SUCCESS
+}
+
+/// Basename for library paths, full path for anything the user typed.
+fn short(p: &std::path::Path) -> String {
+    p.file_name().map_or_else(
+        || p.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 fn cmd_play(args: &[&str]) -> ExitCode {

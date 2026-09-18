@@ -1,22 +1,15 @@
 [package]
-name = "elfa-cli"
-description = "Command-line front end for elf-anatomy."
+name = "elfa-load"
+description = "Resolve a binary's dependency closure and model the whole process."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "elfa"
-path = "src/main.rs"
-
 [dependencies]
 elfa-parse = { path = "../elfa-parse" }
 elfa-model = { path = "../elfa-model" }
-elfa-load = { path = "../elfa-load" }
-elfa-render = { path = "../elfa-render" }
-elfa-trace = { path = "../elfa-trace" }
 
 [lints]
 workspace = true

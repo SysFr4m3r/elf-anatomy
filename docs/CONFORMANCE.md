@@ -239,3 +239,43 @@ that does not exist.
 
 All three are now `--`. The fix is in the assumptions, not in a special case for `.so`
 files: each check asks whether the thing it compares exists before comparing it.
+
+## 11. Lazy binding needs three conditions, not one
+
+The model deferred a relocation whenever it was in `DT_JMPREL` and the object was not
+`BIND_NOW`. That is wrong twice over, and following the dependency closure is what exposed
+it: `hello-static` reported **0 startup relocations** when it has 22.
+
+- **A static binary has no loader to trap into.** There is no `_dl_runtime_resolve` to
+  reach on first call, so its startup code applies everything. The timeline was also
+  printing `relocate · ld.so` above a binary with no interpreter.
+- **An ifunc is never deferred.** `R_*_IRELATIVE` means "call this resolver and write what
+  it returns". Deferring it would mean calling through a PLT entry whose implementation has
+  not been chosen. glibc applies these eagerly even on a lazily-bound object.
+
+The split is per relocation, not per table: a lazily-bound object with ifuncs in its PLT
+table applies some entries and defers the rest, and `elfa steps` now says so —
+`22 lazy, 3 applied now because an ifunc resolver cannot wait`.
+
+`elfa_model::is_deferred` is the single definition, used by both the timeline and the
+closure's relocation counts so they cannot drift apart.
+
+## 12. Two search paths, one inode
+
+`elfa process --verify` reported all four of `/bin/ls`'s dependencies as divergences: we
+resolved `/lib/x86_64-linux-gnu/libc.so.6`, the loader reported
+`/usr/lib/x86_64-linux-gnu/libc.so.6`. On a usrmerge system `/lib` is a symlink to
+`/usr/lib`, so both name the same inode and the comparison was comparing spellings.
+Canonicalised before comparing.
+
+## 13. Dependency order is a partial order
+
+The same command then reported the relocation *order* as divergent: we had
+`[libpcre2, libc, libselinux, ls]`, the loader `[libc, libpcre2, libselinux, ls]`.
+
+Both are correct. `libc` and `libpcre2` do not depend on each other, so nothing orders them
+relative to each other — glibc's link-map sort picks one, our breadth-first discovery picks
+the other. The model's claim is "dependencies before the objects that need them", which is
+a partial order, and the check now verifies exactly that: every dependency edge respected,
+rather than a sequence matched. Asserting the sequence would have been asserting glibc's
+tie-breaking, which is neither modelled nor claimed.

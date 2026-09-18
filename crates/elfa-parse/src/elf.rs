@@ -22,6 +22,11 @@ pub const RELR64_SIZE: u64 = 8;
 /// `e_phnum` sentinel: the real count lives in `shdr[0].sh_info`.
 pub const PN_XNUM: u16 = 0xffff;
 
+/// An ifunc relocation: the addend is a resolver to call, and its return value is the
+/// address written. Never deferred — a PLT entry cannot be called before its resolver has
+/// chosen an implementation.
+pub const R_X86_64_IRELATIVE: u32 = 37;
+
 pub const SHT_NULL: u32 = 0;
 pub const SHT_PROGBITS: u32 = 1;
 pub const SHT_SYMTAB: u32 = 2;

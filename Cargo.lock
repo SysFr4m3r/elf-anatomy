@@ -18,10 +18,19 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 name = "elfa-cli"
 version = "0.0.0"
 dependencies = [
+ "elfa-load",
  "elfa-model",
  "elfa-parse",
  "elfa-render",
  "elfa-trace",
+]
+
+[[package]]
+name = "elfa-load"
+version = "0.0.0"
+dependencies = [
+ "elfa-model",
+ "elfa-parse",
 ]
 
 [[package]]

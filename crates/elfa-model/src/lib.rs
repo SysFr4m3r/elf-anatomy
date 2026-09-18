@@ -541,6 +541,27 @@ pub struct Step {
     pub effects: Vec<Effect>,
 }
 
+/// Whether a relocation is left for later rather than applied during startup.
+///
+/// Lazy binding needs three things to be true at once, and the first version of this
+/// model checked only the last one:
+///
+/// - there has to be **a dynamic loader**. A static binary has nobody to trap into on
+///   first call, so everything it has is applied by its own startup code.
+/// - the object must not be `BIND_NOW`.
+/// - the relocation must not be an **ifunc**. `R_*_IRELATIVE` says "call this resolver and
+///   write what it returns"; deferring it would mean calling through a PLT entry whose
+///   implementation has not been chosen yet, so glibc applies these eagerly even on a
+///   lazily-bound object.
+#[must_use]
+pub fn is_deferred(summary: &Summary, r: &Reloc) -> bool {
+    let dynamic = summary.has_dynamic && summary.interp.is_some();
+    r.table == RelocTableKind::JmpRel
+        && dynamic
+        && !summary.bind_now
+        && r.r_type != elfa_parse::elf::R_X86_64_IRELATIVE
+}
+
 /// A step before it has been numbered.
 type Pending = (Phase, Actor, String, Vec<Span>, Vec<Effect>);
 
@@ -853,6 +874,14 @@ impl Timeline {
         }
 
         // --- relocation, in the order glibc applies the tables ---
+        //
+        // A static binary relocates itself: there is no ld.so in the process to do it,
+        // and saying otherwise put "relocate · ld.so" above a binary with no interpreter.
+        let actor = if summary.interp.is_some() {
+            Actor::Interp
+        } else {
+            Actor::Program
+        };
         let mut deferred_plt = 0usize;
         for table in [
             RelocTableKind::Relr,
@@ -866,29 +895,30 @@ impl Timeline {
             }
             // Under lazy binding the PLT relocations are *not* applied here. Listing
             // them as writes in this pass would be the 2008 animation: it is the thing
-            // §0.6 exists to avoid.
-            let lazy = table == RelocTableKind::JmpRel && !summary.bind_now;
+            // §0.6 exists to avoid. But the split is per relocation, not per table: an
+            // ifunc in the PLT table is applied now even when its neighbours are not.
+            let (deferred, applied): (Vec<&Reloc>, Vec<&Reloc>) =
+                group.iter().partition(|r| is_deferred(summary, r));
             push(
                 Phase::Relocate,
-                Actor::Interp,
+                actor,
                 format!(
                     "{}: {}{}",
                     table_name(table),
                     plural(group.len(), "relocation"),
-                    if lazy {
-                        " — lazy, so nothing is written yet"
-                    } else {
-                        ""
+                    match (deferred.len(), applied.len()) {
+                        (0, _) => String::new(),
+                        (_, 0) => " — lazy, so nothing is written yet".to_string(),
+                        (d, a) => format!(
+                            " — {d} lazy, {a} applied now because an ifunc resolver cannot wait"
+                        ),
                     }
                 ),
                 Vec::new(),
                 Vec::new(),
             );
-            if lazy {
-                deferred_plt = group.len();
-                continue;
-            }
-            for r in group {
+            deferred_plt = deferred_plt.saturating_add(deferred.len());
+            for r in applied {
                 let what = elfa_parse::elf::r_x86_64_name(r.r_type)
                     .map_or_else(|| format!("type {}", r.r_type), ToString::to_string);
                 let sym = r
@@ -897,7 +927,7 @@ impl Timeline {
                     .map_or_else(String::new, |s| format!(" → {s}"));
                 push(
                     Phase::Relocate,
-                    Actor::Interp,
+                    actor,
                     format!("write {:#x}: {what}{sym}", r.offset),
                     alloc::vec![r.file_span],
                     alloc::vec![Effect::Write(Poke {
@@ -926,7 +956,7 @@ impl Timeline {
             if end > start {
                 push(
                     Phase::Protect,
-                    Actor::Interp,
+                    actor,
                     format!(
                         "mprotect {:#x}..{:#x} read-only — PT_GNU_RELRO: the GOT is sealed now that relocation is done{}",
                         start,
@@ -955,7 +985,7 @@ impl Timeline {
         if let Some(init) = summary.init {
             push(
                 Phase::Init,
-                Actor::Interp,
+                actor,
                 format!("call DT_INIT at {init:#x}"),
                 Vec::new(),
                 Vec::new(),
@@ -967,7 +997,7 @@ impl Timeline {
             let count = size / 8;
             push(
                 Phase::Init,
-                Actor::Interp,
+                actor,
                 format!(
                     "run DT_INIT_ARRAY at {addr:#x}: {} — C++ static constructors and __attribute__((constructor)) live here",
                     plural(count as usize, "initialiser")
@@ -1269,6 +1299,46 @@ mod timeline_tests {
         assert_eq!(vmas.len(), 2, "different segments must not merge: {vmas:?}");
         assert_eq!(vmas[0].end, vmas[1].start);
         assert_eq!(vmas[0].prot, vmas[1].prot);
+    }
+
+    #[test]
+    fn deferring_a_relocation_takes_three_conditions() {
+        let plt = |r_type| reloc(RelocTableKind::JmpRel, 0x4000, r_type);
+        const IFUNC: u32 = elfa_parse::elf::R_X86_64_IRELATIVE;
+
+        // The ordinary lazy case: dynamic, not BIND_NOW, not an ifunc.
+        let lazy = summary(false);
+        assert!(is_deferred(&lazy, &plt(7)));
+        // An ifunc is applied even then: a PLT entry cannot be called before its resolver
+        // has chosen an implementation.
+        assert!(!is_deferred(&lazy, &plt(IFUNC)));
+        // BIND_NOW applies everything up front.
+        assert!(!is_deferred(&summary(true), &plt(7)));
+
+        // A static binary has no loader to trap into, so nothing is ever deferred —
+        // hello-static has 22 ifunc relocations and the first version of this reported
+        // them as lazy, under the heading "relocate · ld.so".
+        let mut stat = summary(false);
+        stat.interp = None;
+        stat.has_dynamic = false;
+        assert!(!is_deferred(&stat, &plt(7)));
+        assert!(!is_deferred(&stat, &plt(IFUNC)));
+    }
+
+    #[test]
+    fn a_static_binary_relocates_itself() {
+        let mut s = summary(false);
+        s.interp = None;
+        s.has_dynamic = false;
+        let image = MemImage::from_segments(&s.segments, 0x4000);
+        let tl = Timeline::plan(&s, &image);
+        assert!(
+            tl.steps()
+                .iter()
+                .filter(|st| matches!(st.phase, Phase::Relocate | Phase::Protect | Phase::Init))
+                .all(|st| st.actor == Actor::Program),
+            "no ld.so is present to do any of it"
+        );
     }
 
     #[test]
