@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/elfa-parse", "crates/elfa-model", "crates/elfa-render", "crates/elfa-trace", "crates/elfa-cli"]
+members = ["crates/elfa-parse", "crates/elfa-model", "crates/elfa-render", "crates/elfa-trace", "crates/elfa-web", "crates/elfa-cli"]
 exclude = ["fuzz"]
 
 [workspace.package]

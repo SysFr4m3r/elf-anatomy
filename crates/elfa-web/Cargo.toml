@@ -1,0 +1,28 @@
+[package]
+name = "elfa-web"
+description = "Browser front end: parse and render an ELF file in a tab."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+elfa-parse = { path = "../elfa-parse", default-features = false }
+elfa-model = { path = "../elfa-model" }
+elfa-render = { path = "../elfa-render" }
+wasm-bindgen = "=0.2.128"
+
+# Deliberately not `workspace = true`: the workspace forbids unsafe, and wasm-bindgen's
+# generated glue contains it. Everything this crate calls keeps the forbid.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"

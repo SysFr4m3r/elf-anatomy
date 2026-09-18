@@ -1,5 +1,9 @@
 # Documentation
 
+`index.html` here is the browser viewer (built by `scripts/build-web.sh` into `pkg/`), and
+`player.html` is the pre-rendered fallback that needs no wasm. GitHub Pages serves this
+directory.
+
 | | |
 |---|---|
 | [MODEL.md](MODEL.md) | The loader model: the step list, what each phase does, what is out of scope |

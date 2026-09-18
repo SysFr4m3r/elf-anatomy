@@ -40,6 +40,17 @@ $ elfa steps fixtures/out/relr
       31  first call through each PLT stub traps into _dl_runtime_resolve
 ```
 
+## Try it on your own binary
+
+**[Open the viewer](https://sysfr4m3r.github.io/elf-anatomy/)** and drop an ELF file in.
+It is parsed in the tab — no upload, no server, no build step. Both animations are
+scrubbable, frame by frame.
+
+The parser, the memory model, the timeline and the renderer are the same code the CLI
+runs, compiled to `wasm32-unknown-unknown`; the browser layer is 150 lines that hold a
+parsed file between calls. A 2 MB `libc.so.6` parses once and then scrubs at about 3 ms a
+frame, because the expensive step happens on drop and never again.
+
 ## Is any of that true?
 
 That is the part most tools skip. This one runs the program under `LD_DEBUG`, stops it
@@ -84,7 +95,8 @@ cargo build --release
 | `elfa diff <file>` | check the model against that recording |
 | `elfa play <file>` | one HTML file that scrubs through both animations |
 
-`scripts/render-gif.sh <file> morph|steps` turns the frames into the animations above.
+`scripts/render-gif.sh <file> morph|steps` turns the frames into the animations above, and
+`scripts/build-web.sh` builds the browser viewer into `docs/`.
 
 ```sh
 elfa play /bin/ls -o player.html

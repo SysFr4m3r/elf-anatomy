@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>elf-anatomy — watch a binary become a process</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; }
+  body { margin: 0; background: #0f1115; color: #d7dde5;
+         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { max-width: 1240px; height: 100%; margin: 0 auto; padding: 10px 16px;
+         display: flex; flex-direction: column; box-sizing: border-box; }
+  header { flex: none; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  h1 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
+  .sub { color: #6b7482; font-size: 12px; flex: 1 1 320px; min-width: 0;
+         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button, label.file { background: #191d24; color: #d7dde5; border: 1px solid #262c36;
+           border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; }
+  button:hover, label.file:hover { background: #232a34; }
+  input[type=file] { display: none; }
+  .tabs { display: flex; gap: 8px; margin: 8px 0; flex: none; }
+  .tabs button[aria-selected="true"] { background: #232a34; }
+  .tabs button[aria-selected="false"] { color: #8892a0; }
+  .stage { position: relative; background: #0f1115; border: 1px solid #1c2129;
+           border-radius: 8px; overflow: hidden; flex: 1 1 auto; min-height: 0;
+           display: flex; align-items: center; justify-content: center; }
+  .stage svg { display: block; width: 100%; height: 100%; max-height: 100%; }
+  .drop { color: #6b7482; text-align: center; padding: 32px; }
+  .drop strong { color: #d7dde5; font-weight: 600; }
+  body.dragging .stage { border-color: #4c8dff; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex: none; }
+  .controls button { width: 40px; height: 34px; padding: 0; }
+  input[type=range] { flex: 1; accent-color: #4c8dff; }
+  .pos { color: #6b7482; min-width: 86px; text-align: right; }
+  .hint { color: #6b7482; margin: 8px 0 0; font-size: 12px; flex: none; }
+  .err { color: #ef6ea8; }
+  @media (max-height: 560px) { .hint { display: none; } }
+</style></head><body><main>
+
+<header>
+  <div>
+    <h1>elf-anatomy</h1>
+    <div class="sub" id="sub">watch a binary become a process</div>
+  </div>
+  <label class="file">open a binary<input type="file" id="file"></label>
+</header>
+
+<div class="tabs" role="tablist">
+  <button role="tab" data-track="0" aria-selected="true">file → memory</button>
+  <button role="tab" data-track="1" aria-selected="false">the load</button>
+</div>
+
+<div class="stage" id="stage">
+  <div class="drop" id="drop">
+    <strong>Drop an ELF binary here</strong><br>
+    or use “open a binary”. Nothing is uploaded — it is parsed in this tab.<br>
+    <span id="status">loading…</span>
+  </div>
+</div>
+
+<div class="controls">
+  <button data-act="home" title="First (Home)">|&lt;</button>
+  <button data-act="prev" title="Back one (Left)">&lt;</button>
+  <button data-act="play" title="Play / pause (Space)">&#9654;</button>
+  <button data-act="next" title="Forward one (Right)">&gt;</button>
+  <button data-act="end" title="Last (End)">&gt;|</button>
+  <input type="range" id="range" min="0" max="0" value="0" disabled>
+  <span class="pos" id="pos">–</span>
+</div>
+<p class="hint">Space plays and pauses · &larr; and &rarr; step one frame · Home and End jump to the ends · x86-64 ELF64 only.</p>
+
+</main>
+<script type="module">
+import init, { Session } from './pkg/elfa_web.js';
+
+const el = id => document.getElementById(id);
+const stage = el('stage'), range = el('range'), pos = el('pos'), sub = el('sub');
+const playBtn = document.querySelector('[data-act=play]');
+
+let session = null, track = 0, at = 0, timer = null;
+let cache = [[], []];
+
+const count = () => track === 0 ? session.morphFrames() : session.stepCount();
+const render = n => track === 0 ? session.renderMorph(n) : session.renderStep(n);
+
+function show(n) {
+  if (!session) return;
+  const max = count() - 1;
+  n = Math.max(0, Math.min(max, n));
+  if (cache[track][n] === undefined) cache[track][n] = render(n);
+  stage.innerHTML = cache[track][n];
+  at = n;
+  range.value = n;
+  range.max = max;
+  pos.textContent = n + ' / ' + max;
+}
+
+function stop() { clearInterval(timer); timer = null; playBtn.innerHTML = '&#9654;'; }
+function start() {
+  if (!session) return;
+  if (at >= count() - 1) show(0);
+  playBtn.innerHTML = '&#10073;&#10073;';
+  timer = setInterval(() => { at >= count() - 1 ? stop() : show(at + 1); }, 90);
+}
+const toggle = () => timer ? stop() : start();
+
+async function load(name, bytes) {
+  stop();
+  try {
+    session = new Session(name, new Uint8Array(bytes));
+  } catch (e) {
+    stage.innerHTML = '<div class="drop err">' + String(e.message || e) + '</div>';
+    range.disabled = true;
+    pos.textContent = '–';
+    sub.textContent = name;
+    session = null;
+    return;
+  }
+  cache = [[], []];
+  range.disabled = false;
+  sub.textContent = session.summary();
+  document.title = name + ' — elf-anatomy';
+  show(0);
+}
+
+range.addEventListener('input', () => { stop(); show(+range.value); });
+document.querySelectorAll('[data-act]').forEach(b =>
+  b.addEventListener('click', () => {
+    const act = b.dataset.act;
+    if (act === 'play') return toggle();
+    stop();
+    if (act === 'home') show(0);
+    if (act === 'end') show(count() - 1);
+    if (act === 'prev') show(at - 1);
+    if (act === 'next') show(at + 1);
+  })
+);
+document.querySelectorAll('[role=tab]').forEach(tab =>
+  tab.addEventListener('click', () => {
+    stop();
+    document.querySelectorAll('[role=tab]').forEach(o =>
+      o.setAttribute('aria-selected', o === tab));
+    track = +tab.dataset.track;
+    show(0);
+  })
+);
+addEventListener('keydown', e => {
+  if (!session) return;
+  const d = { ArrowLeft: -1, ArrowRight: 1 };
+  if (e.key in d) { stop(); show(at + d[e.key]); }
+  else if (e.key === ' ') toggle();
+  else if (e.key === 'Home') { stop(); show(0); }
+  else if (e.key === 'End') { stop(); show(count() - 1); }
+  else return;
+  e.preventDefault();
+});
+
+el('file').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (f) load(f.name, await f.arrayBuffer());
+});
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+addEventListener('dragleave', () => document.body.classList.remove('dragging'));
+addEventListener('drop', async e => {
+  e.preventDefault();
+  document.body.classList.remove('dragging');
+  const f = e.dataTransfer.files[0];
+  if (f) load(f.name, await f.arrayBuffer());
+});
+
+await init();
+// A sample so the page shows something before anyone drops a file. Fetched, not embedded,
+// so the wasm stays small; over file:// this fails and the drop zone stays, which is the
+// right outcome rather than an error.
+try {
+  const r = await fetch('./hello-dyn');
+  if (!r.ok) throw new Error();
+  await load('hello-dyn (sample)', await r.arrayBuffer());
+} catch {
+  el('status').textContent = 'ready — x86-64 ELF64 little-endian';
+}
+</script></body></html>
