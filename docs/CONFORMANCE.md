@@ -220,3 +220,22 @@ measurement, which is the failure mode this whole document exists to prevent.
 On a lazily-bound object the extra count rises by one: the PLT symbol is excluded from the
 model's set (nothing is written before `main`) but the loader still binds it on first call,
 and the trace covers the whole process.
+
+## 10. Three checks assumed the target was a program
+
+Pointing `elfa diff` at `libc.so.6` reported three divergences, all of them the tool's
+fault. A shared library is directly executable, and when you run one it *is* the main
+object — so checks phrased around "the program and its dependencies" describe a situation
+that does not exist.
+
+- **DT_NEEDED**: libc depends on `ld-linux-x86-64.so.2` and the loader never searches for
+  it, because the interpreter is in the process before the first `DT_NEEDED` is read. The
+  check now excludes a dependency that names the interpreter. This was never
+  library-specific — it was wrong for any object that lists its own interpreter.
+- **relocation order**: "dependencies first" has nothing to say when there are no
+  dependencies. Being relocated first is then correct, not a divergence.
+- **initialiser order**: glibc emits `initialize program` for an executable. A library
+  invoked directly never gets one, so there is no initialiser of ours to be last.
+
+All three are now `--`. The fix is in the assumptions, not in a special case for `.so`
+files: each check asks whether the thing it compares exists before comparing it.

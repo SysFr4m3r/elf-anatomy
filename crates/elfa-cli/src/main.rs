@@ -892,8 +892,24 @@ fn compare(
         }
     });
 
-    // Dependencies: the model knows SONAMEs, the trace knows resolved paths.
-    let wanted: Vec<&str> = p.summary.needed.iter().map(AsRef::as_ref).collect();
+    // Dependencies. The model knows SONAMEs, the trace knows resolved paths.
+    //
+    // A DT_NEEDED naming the interpreter is already satisfied: ld.so is in the process
+    // before the first DT_NEEDED is read, so it is never searched for. libc.so.6 depends
+    // on ld-linux and would otherwise be reported as a missing dependency of itself.
+    let interp_base = p
+        .summary
+        .interp
+        .as_deref()
+        .and_then(|i| i.rsplit('/').next())
+        .unwrap_or("");
+    let wanted: Vec<&str> = p
+        .summary
+        .needed
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|n: &&str| *n != interp_base)
+        .collect();
     let resolved: Vec<String> = observed.aliases().keys().cloned().collect();
     let missing: Vec<&&str> = wanted
         .iter()
@@ -901,14 +917,16 @@ fn compare(
         .collect();
     checks.push(Check {
         name: "DT_NEEDED",
-        verdict: if missing.is_empty() && !wanted.is_empty() {
-            Verdict::Match
-        } else if wanted.is_empty() {
+        verdict: if wanted.is_empty() {
             Verdict::NotModelled
+        } else if missing.is_empty() {
+            Verdict::Match
         } else {
             Verdict::Differ
         },
-        detail: if missing.is_empty() {
+        detail: if wanted.is_empty() {
+            "nothing beyond the interpreter, which is loaded before any search happens".to_owned()
+        } else if missing.is_empty() {
             format!("{} resolved: {}", wanted.len(), wanted.join(", "))
         } else {
             format!("never searched for: {missing:?}")
@@ -916,14 +934,21 @@ fn compare(
     });
 
     // The model claims dependencies are relocated before the program. The trace can
-    // confirm or refute that directly.
+    // confirm or refute that — but only when there are dependencies. Run a shared library
+    // directly and it is the main object with nothing beneath it, so "first" is correct
+    // and the check has nothing to say.
     let order = observed.relocation_order();
     let self_at = order.iter().position(|o| o.ends_with(&stem));
     checks.push(match self_at {
+        _ if wanted.is_empty() => Check {
+            name: "relocation order",
+            verdict: Verdict::NotModelled,
+            detail: "no dependencies, so nothing is required to precede it".to_owned(),
+        },
         Some(i) if i > 0 => Check {
             name: "relocation order",
             verdict: Verdict::Match,
-            detail: format!("{} object(s) relocated before the program", i),
+            detail: format!("{i} object(s) relocated before the program"),
         },
         Some(_) => Check {
             name: "relocation order",
@@ -937,9 +962,17 @@ fn compare(
         },
     });
 
-    // Initialisers: the program must be last.
+    // Initialisers: the program must be last. Again only when the loader treated the
+    // target as a program at all — glibc emits "initialize program" for an executable,
+    // and a library invoked directly never gets one.
     let init = observed.init_order();
+    let ran_ours = init.iter().any(|o| o.ends_with(&stem));
     checks.push(match init.last() {
+        _ if !ran_ours => Check {
+            name: "initialiser order",
+            verdict: Verdict::NotModelled,
+            detail: "the loader ran no initialiser for this object".to_owned(),
+        },
         Some(last) if last.ends_with(&stem) => Check {
             name: "initialiser order",
             verdict: Verdict::Match,
